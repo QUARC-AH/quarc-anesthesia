@@ -105,6 +105,15 @@ label.f>span{display:block;font-size:11.5px;font-weight:700;color:var(--ink2);ma
 .drow .vol{font-size:21px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--accent);white-space:nowrap}
 .drow .vol small{font-size:11px;color:var(--ink2)}
 .drow .rm{border:0;background:none;color:#b6c0ca;font-size:19px;cursor:pointer;min-width:30px}
+/* 薬剤を選ぶ一覧（チェックを入れてまとめて追加） */
+.pbox{margin-top:8px;border:1px solid var(--line);border-radius:12px;background:#fbfaf8;
+  max-height:46vh;overflow:auto;padding:4px 7px 7px;-webkit-overflow-scrolling:touch}
+.pcat{position:sticky;top:0;z-index:1;background:#fbfaf8;font-size:11.5px;font-weight:800;
+  color:var(--accent);padding:8px 3px 5px}
+.drow.pk{margin:5px 0;cursor:pointer}
+.drow.pk.added{opacity:.5}
+.drow.pk.added .cb{border-style:dashed}
+.pbar{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
 
 /* ---------- record ---------- */
 .stampbar{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}
@@ -284,7 +293,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v2.7 (2026-09-17)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v2.9 (2026-09-17)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -1135,9 +1144,12 @@ function viewPrep(M){
     ${vet?`<div class="who">担当 <b>${esc(vet)}</b></div>`
         :`<div class="warnbox">麻酔担当医が未設定です。患者情報で選んでから薬剤を追加してください。
            <button class="btn sm" style="margin-top:6px" onclick="go('edit',cur)">患者情報を開く</button></div>`}
-    <div class="row" style="margin-top:8px">
-      <select id="p_sel" style="flex:1" ${vet?'':'disabled'}>${prepOptions()}</select>
-      <button class="btn primary" onclick="addDrug()" ${vet?'':'disabled'}>追加</button>
+    <input id="p_q" placeholder="薬剤名でしぼる" value="${esc(prepQ)}" style="margin-top:8px"
+      oninput="prepSearch(this.value)" ${vet?'':'disabled'}>
+    <div class="pbox" id="p_list">${prepAddList(c,W)}</div>
+    <div class="pbar">
+      <button class="btn primary sp" id="p_add" onclick="addPicked()" ${vet?'':'disabled'}>＋ 選んで追加</button>
+      <button class="btn sm hide" id="p_clr" onclick="prepPick.clear();render()">選び直す</button>
     </div>
     <div class="row" style="margin-top:8px"><button class="btn sm" onclick="addFree()" ${vet?'':'disabled'}>＋ 一覧にない薬剤</button></div>
   </div>
@@ -1166,17 +1178,75 @@ function viewPrep(M){
   const pb=document.querySelector('select[data-staff="prepBy"]');
   if(pb){ pb.id='p_by';
     pb.onchange=()=>{ c.prep.by=pb.value; if(pb.value)store.set('lastStaff',pb.value); save(); render(); }; }
+  prepCount();
 }
-/* 準備リストに足せる薬。シートの分類ごとに並べます */
-function prepOptions(){
-  let html='', cur2=null;
-  ALLDRUGS.forEach((d,i)=>{
-    const lab=d.cat||'その他';
-    if(lab!==cur2){ if(cur2!==null)html+='</optgroup>'; html+=`<optgroup label="${esc(lab)}">`; cur2=lab; }
-    html+=`<option value="${i}">${esc(d.n)}${d.cri?'（CRI）':''}　${esc(d.d)}${
-      potency(d)?'　['+potency(d)+']':''}${d.r?'　'+esc(d.r):''}${d.warn?'　⚠':''}</option>`;
+
+/* ---- 薬剤を選ぶ一覧 ----
+   使う薬にチェックを入れて、最後に1回だけ「追加」を押します。
+   選んだ状態は薬剤名と濃度で覚えるので、しぼり込んでも消えません。 */
+let prepPick=new Set(), prepQ='';
+const pkey=d=>d.n+'|'+(d.conc==null?'':d.conc)+'|'+(d.cri?'CRI':'-');
+function prepAddList(c,W){
+  const have=new Set((c.prep.items||[]).map(x=>x.name));
+  const q=prepQ.trim().toLowerCase();
+  let html='', cat=null, n=0;
+  ALLDRUGS.forEach(d=>{
+    if(q&&((d.n||'')+' '+(d.cat||'')+' '+(d.d||'')).toLowerCase().indexOf(q)<0) return;
+    /* CRI はひとまとめに後ろへ並ぶので、見出しにもそう書きます */
+    const lab=(d.cat||'その他')+(d.cri&&!/CRI/i.test(d.cat||'')?'（CRI）':'');
+    if(lab!==cat){ cat=lab; html+=`<div class="pcat">${esc(lab)}</div>`; }
+    n++;
+    const k=pkey(d), added=have.has(d.n), on=!added&&prepPick.has(k);
+    const ml=d.cri?criRate(d,{v:d.dose,u:d.dunit},W):(d.ml==null?null:W*d.ml);
+    html+=`<div class="drow pk ${on?'on':''} ${added?'added':''}" data-k="${esc(k)}"
+        onclick="${added?"toast('もう準備リストに入っています')":'prepToggle(this)'}">
+      <div class="cb"></div>
+      <div class="nm"><b>${esc(d.n)}${d.cri?'（CRI）':''}${
+        potency(d)?` <span style="font-size:11.5px;color:var(--ink2);font-weight:700">${esc(potency(d))}</span>`:''}</b>
+        <small>${esc(d.d||'')}${d.r?' ・ '+esc(d.r):''}${added?' ・ <b>追加済み</b>':''}${d.warn?' ・ ⚠':''}</small></div>
+      <div class="vol">${(W&&ml!=null)?esc(fmt(ml)):'—'}<small> ${d.cri?'mL/hr':'mL'}</small></div>
+    </div>`;
   });
-  return html+(cur2===null?'':'</optgroup>');
+  return n?html:'<div class="empty">見つかりません</div>';
+}
+/* チェックの出し入れ。一覧を作り直すと重いので、その行だけ塗り替えます */
+function prepToggle(el){
+  const k=el.dataset.k;
+  if(prepPick.has(k)) prepPick.delete(k); else prepPick.add(k);
+  el.classList.toggle('on',prepPick.has(k));
+  prepCount();
+}
+function prepCount(){
+  const b=document.getElementById('p_add'); if(!b) return;
+  const n=prepPick.size;
+  b.textContent=n?`＋ 選んだ ${n}剤 を追加`:'＋ 選んで追加';
+  b.disabled=!n||!cur||!cur.meta.anesthetist;
+  const cl=document.getElementById('p_clr'); if(cl) cl.classList.toggle('hide',!n);
+}
+function prepSearch(v){
+  prepQ=v;
+  const n=document.getElementById('p_list'); if(!n) return;
+  n.innerHTML=prepAddList(cur,bw(cur)); prepCount();
+}
+/* チェックした薬をまとめて準備リストへ */
+function addPicked(){
+  if(!cur.meta.anesthetist){ toast('麻酔担当医を設定してください'); return; }
+  if(!prepPick.size){ toast('使う薬にチェックを入れてください'); return; }
+  const W=bw(cur), have=new Set(cur.prep.items.map(x=>x.name));
+  let n=0;
+  ALLDRUGS.forEach(d=>{
+    if(!prepPick.has(pkey(d))||have.has(d.n)) return;
+    have.add(d.n);
+    const ml=d.cri?criRate(d,{v:d.dose,u:d.dunit},W):(d.ml==null?null:W*d.ml);
+    cur.prep.items.push({k:uid(),name:d.n,dose:d.d,route:d.r||(d.cri?'CRI':''),dil:d.dil,mlkg:d.ml,
+      abx:!!d.abx,pot:potency(d),cri:!!d.cri,
+      conc:d.conc??null,cunit:d.cunit||'',doseN:d.dose??null,dunit:d.dunit||'',
+      vol:(W&&ml!=null)?fmt(ml):'',checked:false,addedBy:cur.meta.anesthetist});
+    n++;
+  });
+  prepPick.clear(); prepQ='';
+  save(); render();
+  toast(`${n}剤 を準備リストに追加しました`+(W?'':'（体重を入れると mL が出ます）'));
 }
 /* ================= 薬剤準備のプリセット（院内で共有） =================
    麻酔科医ごとの「いつもの組み合わせ」を名前を付けて保存し、1タップで並べます。
@@ -1269,17 +1339,6 @@ function presetBar(c){
   ${PRESETS.length?'':'<p class="muted" style="font-size:12px;margin:7px 0 0">よく使う組み合わせを保存しておくと、次からは1タップで並びます。</p>'}`;
 }
 
-function addDrug(){
-  if(!cur.meta.anesthetist){ toast('麻酔担当医を設定してください'); return; }
-  const d=ALLDRUGS[+document.getElementById('p_sel').value], W=bw(cur);
-  if(!d) return;
-  const ml=d.cri?criRate(d,{v:d.dose,u:d.dunit},W):(d.ml==null?null:W*d.ml);
-  cur.prep.items.push({k:uid(),name:d.n,dose:d.d,route:d.r||(d.cri?'CRI':''),dil:d.dil,mlkg:d.ml,
-    abx:!!d.abx,pot:potency(d),cri:!!d.cri,
-    conc:d.conc??null,cunit:d.cunit||'',doseN:d.dose??null,dunit:d.dunit||'',
-    vol:(W&&ml!=null)?fmt(ml):'',checked:false,addedBy:cur.meta.anesthetist});
-  save(); render();
-}
 function addFree(){
   openModal(`<h2>薬剤を追加</h2>
     <div class="grid"><label class="f"><span>薬剤名</span><input id="f_n"></label>
@@ -2500,6 +2559,43 @@ async function backupPing(){
   }catch(e){ toast('つながりませんでした。URL が /exec で終わっているか確認してください'); }
 }
 
+/* ---- グラフを画像としてコピーする ----
+   ドキュメントに貼り付けるための機能。Safari では「押した流れの中で」
+   クリップボードに渡す必要があるため、画像ができるのを待たずに約束（Promise）を渡します。 */
+const chartBlob=(c,W)=>chartPNG(c,W).then(d=>{
+  if(!d) throw new Error('画像にできませんでした');
+  return fetch(d).then(r=>r.blob());
+});
+/* グラフに出せる記録があるか */
+function chartHas(c){ try{ const s=vchart(c); return !!s&&s.indexOf('<svg')>=0; }catch(e){ return false; } }
+function copyChart(){
+  const c=cur;
+  if(!chartHas(c)){ toast('グラフに出せる記録がまだありません'); return; }
+  if(!(navigator.clipboard&&navigator.clipboard.write&&window.ClipboardItem)){ chartImgModal(c); return; }
+  let item;
+  const bp=chartBlob(c);
+  bp.catch(()=>{});            /* 失敗しても「未処理」にしない。下の catch で拾います */
+  try{ item=new ClipboardItem({'image/png':bp}); }
+  catch(e){ chartImgModal(c); return; }
+  navigator.clipboard.write([item])
+    .then(()=>toast('グラフをコピーしました。ドキュメントに貼り付けてください'))
+    .catch(()=>chartImgModal(c));
+}
+/* コピーが使えない端末のために、画像そのものを出します（長押しで保存・コピー） */
+function chartImgModal(c){
+  if(!chartHas(c)){ toast('グラフに出せる記録がまだありません'); return; }
+  toast('画像を作っています…');
+  chartPNG(c).then(d=>{
+    if(!d){ toast('グラフを画像にできませんでした'); return; }
+    openModal(`<h2>麻酔記録グラフ</h2>
+      <p class="muted" style="font-size:12.5px;margin:0 0 8px">画像を<b>長押し</b>して「コピー」または「写真に保存」を選んでください。
+        そのままドキュメントに貼り付けられます。</p>
+      <img id="ci_img" src="${d}" alt="麻酔記録グラフ"
+        style="width:100%;border:1px solid var(--line);border-radius:10px;background:#fff">
+      <div class="row" style="margin-top:12px"><button class="btn primary sp" onclick="closeModal()">閉じる</button></div>`);
+  });
+}
+
 /* ---- Google Drive へのバックアップ ----
    麻酔終了（抜管）のときに、レポート(PDF)・記録(JSON)・グラフ(PNG)を院内の Drive に残します。
    圏外のときは「送信待ち」にして、つながった時点で自動で送り直します。 */
@@ -2572,6 +2668,10 @@ function viewReport(M){
     <div class="repchart">
       <h4>麻酔記録グラフ</h4>
       <div class="chartwrap">${repChart(c)}</div>
+      <div class="row noprint" style="margin-top:8px">
+        <button class="btn sm" id="r_cimg" onclick="copyChart()">🖼 グラフをコピー</button>
+        <button class="btn sm" onclick="chartImgModal(cur)">画像で見る（長押しで保存）</button>
+      </div>
     </div>
     <div class="grid g2 noprint" style="margin-top:10px">
       <button class="btn" onclick="window.print()">印刷 / PDF</button>
