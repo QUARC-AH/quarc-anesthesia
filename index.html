@@ -295,7 +295,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v3.0 (2026-09-23)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.1 (2026-09-23)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -863,6 +863,7 @@ function fix(c){
   }
   delete c.abx;
   c.postop=Object.assign({on:false,interval:30,lastAt:'',rows:[],by:'',stoppedAt:''},c.postop||{});
+  delete c.postop._cycle;   /* 旧版の名残。端末ごとの控え（PO_FIRED）に移しました */
   c.postop.rows=c.postop.rows||[]; if(!c.postop.interval)c.postop.interval=30;
   if(c.postop.by) c.postop.by=staffCanon(c.postop.by);
   c.rep=Object.assign({tube:'',maint:'',resp:'',circ:'',pain:'',ext:'',post:''},c.rep||{});
@@ -1855,6 +1856,7 @@ const ALERT_QUICK=[
   {l:'SpO2クリップの位置を変える', iv:60, rep:true}
 ];
 function alertQuick(i){
+  askNotify();
   const q=ALERT_QUICK[i]; if(!q||!cur) return;
   const c=cur, had=(c.alerts||[]).find(a=>a.l===q.l);
   if(had){ had.at=nowHM(); had.n=0; had.on=true; delete ALERT_FIRED[c.id+'|'+had.k];
@@ -1959,6 +1961,7 @@ function alertIv(v){
     .forEach(b=>b.classList.toggle('on',+b.dataset.v===n));
 }
 function alertSave(){
+  askNotify();   /* この端末でも鳴るように、許可を確かめます */
   const c=cur, d=alertDraft;
   d.l=(document.getElementById('al_l').value||'').trim();
   d.at=document.getElementById('al_at').value||nowHM();
@@ -1975,6 +1978,21 @@ function alertSave(){
 function askNotify(){
   try{ if('Notification' in window&&Notification.permission==='default') Notification.requestPermission(); }catch(e){}
 }
+/* 術後チェックの通知を「もう出したか」は端末ごとに覚えます。
+   症例に書いてしまうと同期で相手にも伝わり、iPad で鳴ると iPhone では鳴らなくなります。 */
+const PO_FIRED={};
+/* 設定画面から押したとき。拒否されている場合は端末の設定が要ることを伝えます */
+function askNotifyNow(){
+  if(!('Notification' in window)){ toast('この端末は通知に対応していません'); return; }
+  if(Notification.permission==='granted'){
+    try{ new Notification('QUARC 麻酔記録',{body:'通知は届いています'}); }catch(e){}
+    toast('この端末では通知が許可されています'); return; }
+  if(Notification.permission==='denied'){
+    toast('拒否されています。iOS は 設定 → 通知 から許可してください'); return; }
+  try{ Notification.requestPermission().then(r=>{
+    toast(r==='granted'?'通知を許可しました':'許可されませんでした');
+    closeModal(); openSettings(); }); }catch(e){}
+}
 /* 抗生物質を記録したときは、この画面を出して間隔を決めてもらいます */
 function askAbx(t,ev){
   const c=cur, a=(c.alerts||[]).find(x=>x.src==='abx');
@@ -1988,8 +2006,8 @@ setInterval(()=>{
   db.cases.forEach(c=>{
     /* 終了を押すまで、設定した間隔で繰り返し通知します */
     const cy=postopCycle(c);
-    if(cy!=null&&cy>=1&&c.postop._cycle!==cy){
-      c.postop._cycle=cy; save();
+    if(cy!=null&&cy>=1&&PO_FIRED[c.id]!==cy){
+      PO_FIRED[c.id]=cy;
       const msg=`${c.meta.patientName}：術後バイタルチェックの時間です`
         +(cy>1?`（${(cy-1)*c.postop.interval}分 超過）`:'');
       try{ if('Notification' in window&&Notification.permission==='granted') new Notification('QUARC 麻酔記録',{body:msg}); }catch(e){}
@@ -2587,7 +2605,7 @@ function viewPostop(M){
 function poSetInt(v){
   const p=cur.postop, n=Math.max(1,Math.min(720,Math.round(+v||0)));
   if(!n){ toast('1〜720分で入れてください'); return; }
-  p.interval=n; p._cycle=-1; save(); render();
+  p.interval=n; delete PO_FIRED[cur.id]; save(); render();
   toast(`${n}分ごとに変更しました`);
 }
 let poDraft={};
@@ -2595,8 +2613,7 @@ const poVal=k=>poDraft[k]??'';
 function poShift(m){ poTime=m2hm((hm2m(poTime)||nowMin())+m); render(); }
 function poToggle(){
   const p=cur.postop; p.on=!p.on;
-  if(p.on){ p.lastAt=nowHM(); p.stoppedAt=''; p._cycle=-1;
-    if('Notification' in window&&Notification.permission==='default') Notification.requestPermission(); }
+  if(p.on){ p.lastAt=nowHM(); p.stoppedAt=''; delete PO_FIRED[cur.id]; askNotify(); }
   else { p.stoppedAt=nowHM(); }
   save(); render(); toast(p.on?`${p.interval}分ごとの通知を開始しました`:'通知を終了しました');
 }
@@ -2619,7 +2636,7 @@ function poSave(){
   const i=p.rows.findIndex(x=>x.t===poTime);
   /* 同じ時刻を上書きするときは、その行の鍵をそのまま引き継ぎます */
   if(i>=0)p.rows[i]={...r,k:p.rows[i].k||uid()}; else p.rows.push({...r,k:uid()});
-  p.lastAt=poTime; p._cycle=-1;
+  p.lastAt=poTime; delete PO_FIRED[cur.id];
   poDraft={tsite:r.tsite||store.get('lastTsite')||TSITE[0]};
   poTime=nowHM(); save(); render(); toast(`${r.t} の記録を保存しました`);
 }
@@ -3216,6 +3233,21 @@ function openSettings(){
      <b style="font-size:13px;color:var(--accent)">スタッフ（獣医師／看護師）</b>
      <p class="muted" style="font-size:12px;margin:6px 0">従業員名簿（${STAFF_REV} 版）より。異動・入退社があれば編集してください。</p>
      <button class="btn sm" onclick="openStaff()">スタッフを編集</button>
+   </div>
+
+   <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+     <b style="font-size:13px;color:var(--accent)">この端末の通知</b>
+     <p class="muted" style="font-size:12px;margin:6px 0">通知は<b>端末ごと</b>に許可が要ります。
+       同じ人が iPad と iPhone を使うときは、<b>両方で許可</b>してください。</p>
+     <div class="row">
+       <span id="s_ntf" style="font-size:12.5px;font-weight:800">${
+         !('Notification' in window)?'この端末は通知に対応していません'
+         :Notification.permission==='granted'?'🟢 許可されています'
+         :Notification.permission==='denied'?'🔴 拒否されています（端末の設定から変更してください）'
+         :'🟠 まだ許可していません'}</span>
+       <span class="sp"></span>
+       <button class="btn sm" onclick="askNotifyNow()">通知を許可する</button>
+     </div>
    </div>
 
    <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
