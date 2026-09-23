@@ -158,6 +158,8 @@ svg.vchart{display:block;max-width:none}
 .logrow .tag.ev{background:#e9f4f8;color:var(--accent)}
 .logrow .tag.dg{background:#f4ecf9;color:#7b3fa0}
 .logrow .x{border:0;background:none;color:#c3ccd6;cursor:pointer;font-size:16px}
+.logrow.tap{cursor:pointer;border-radius:8px;min-height:40px;padding:8px 6px;margin:0 -6px}
+.logrow.tap:active{background:#f1f5f8}
 
 /* ---------- keypad ---------- */
 .kw{position:fixed;inset:0;z-index:200;display:none;background:rgba(10,20,30,.4)}
@@ -293,7 +295,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v2.9 (2026-09-17)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.0 (2026-09-23)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -776,7 +778,8 @@ const VITALS=[
  {k:'rr',  l:'RR',   u:'/min', c:'var(--rr)',   max:220, plot:1},
  {k:'spo2',l:'SpO2', u:'%',    c:'var(--spo2)', max:100, plot:1},
  {k:'etco2',l:'EtCO2',u:'mmHg',c:'var(--etco2)',max:100, plot:1},
- {k:'temp',l:'Temp', u:'℃',   c:'var(--temp)', max:45,  plot:1}
+ {k:'temp',l:'Temp', u:'℃',   c:'var(--temp)', max:45,  plot:1},
+ {k:'pi',  l:'PI',   u:'%',    c:'var(--spo2)', max:20,  plot:1}
 ];
 /* 麻酔器・人工呼吸器・輸液 */
 const MACHINE=[
@@ -785,6 +788,11 @@ const MACHINE=[
  {k:'fio2',l:'FiO2',  u:'%'},        {k:'vt',  l:'VT',    u:'mL'},
  {k:'pip', l:'PIP',   u:'hPa'},      {k:'peep',l:'PEEP',  u:'hPa'},
  {k:'rrset',l:'換気回数',u:'/min'},  {k:'ie',  l:'I:E',   u:'1:x'}
+];
+/* そのほかの記録。バイタルと同じ画面で入れられますが、グラフには出しません */
+const EXTRA=[
+ {k:'bleed',l:'出血量', u:'mL'},     {k:'glu', l:'血糖',   u:'mg/dL'},
+ {k:'pvp',  l:'門脈圧', u:'mmHg'},   {k:'act', l:'ACT',    u:'秒'}
 ];
 /* イベントの種類。新しい記録は kk に入ります（k は同期用の鍵）。
    旧い記録は k に種類が入っているので、読むときは両方を見ます */
@@ -800,7 +808,15 @@ const EVENTS=[
  {k:'opeend',    l:'手術終了',    stamp:'opeStop'},
  {k:'exam',      l:'検査'},
  {k:'extubation',l:'抜管',        stamp:'anesStop'},
- {k:'awake',     l:'覚醒'}
+ {k:'awake',     l:'覚醒'},
+ /* 術中に起きたこと。押した時点で記録され、あとから記録一覧でメモを足せます */
+ {k:'arrhy',     l:'不整脈'},
+ {k:'hypoxia',   l:'低酸素'},
+ {k:'hypovent',  l:'低換気'},
+ {k:'bleeding',  l:'出血'},
+ {k:'moving',    l:'体動あり'},
+ /* 急変時の「とりあえず記録」。時刻だけ打刻して、あとで内容を書きます */
+ {k:'mark',      l:'⚑ とりあえず記録'}
 ];
 /* イベントの「種類」に使う語。旧版のデータを直すときの目印にします */
 const EVKINDS=new Set(EVENTS.map(e=>e.k).concat(['note','staff']));
@@ -894,6 +910,10 @@ function times(c){
 function elapsed(c){ const s=hm2m(c.chart.anesStart); if(s==null)return null;
   if(c.chart.anesStop) return diff(c.chart.anesStart,c.chart.anesStop);
   let d=nowMin()-s; if(d<-720)d+=1440; return Math.max(0,d); }
+/* 手術開始からの経過。手術終了を押すまで数え続けます */
+function opeElapsed(c){ const s=hm2m(c.chart.opeStart); if(s==null)return null;
+  if(c.chart.opeStop) return diff(c.chart.opeStart,c.chart.opeStop);
+  let d=nowMin()-s; if(d<-720)d+=1440; return Math.max(0,d); }
 function lastVitalMin(c){
   let mx=null; Object.keys(c.chart.v).forEach(t=>{const m=hm2m(t); if(m!=null&&(mx==null||m>mx))mx=m});
   if(mx==null)return null; let d=nowMin()-mx; if(d<-720)d+=1440; return d;
@@ -964,7 +984,7 @@ function viewList(M){
     '<div class="empty">本日の麻酔はまだ登録されていません。<br>右下の「＋ 新規麻酔」から登録してください。</div>'}</div>`;
 }
 function pcard(c){
-  const s=statusOf(c), k=col(c), t=times(c), el=elapsed(c), lv=lastVitalMin(c);
+  const s=statusOf(c), k=col(c), t=times(c), el=elapsed(c), lv=lastVitalMin(c), oel=opeElapsed(c);
   const need=s.k==='live'&&lv!=null&&lv>=6;
   const alDue=alertDueCount(c);
   return `<div class="pcard" style="--c:${k.br}">
@@ -977,6 +997,7 @@ function pcard(c){
         <span>${esc(c.meta.date||'')}</span>
         ${c.meta.risk?`<span>ASA ${esc(c.meta.risk)}</span>`:''}
         ${s.k==='live'&&el!=null?`<span style="color:var(--warn);font-weight:800">麻酔 ${el}分</span>`:''}
+        ${s.k==='live'&&oel!=null&&!c.chart.opeStop?`<span style="color:var(--warn);font-weight:800">手術 ${oel}分</span>`:''}
         ${need?`<span style="color:var(--warn);font-weight:800">未記録 ${lv}分</span>`:''}
         ${alDue?`<span style="color:var(--warn);font-weight:800">🔔 ${alDue}件 時間です</span>`:''}
         ${s.k==='done'&&t.anes!=null?`<span>麻酔 ${t.anes}分</span>`:''}
@@ -1375,9 +1396,10 @@ function finishPrep(){
 /* ================= ③ 麻酔記録 ================= */
 let recTab='vital', recTime='';
 function viewRec(M){
-  const c=cur, s=statusOf(c), t=times(c), el=elapsed(c);
+  const c=cur, s=statusOf(c), t=times(c), el=elapsed(c), oel=opeElapsed(c);
   if(!recTime) recTime=nowHM();
-  head(c.meta.patientName||'（無題）', `${c.meta.patientId||''} ・ ${c.meta.bw||'?'}kg${el!=null?' ・ 麻酔 '+el+'分':''}`);
+  head(c.meta.patientName||'（無題）', `${c.meta.patientId||''} ・ ${c.meta.bw||'?'}kg${
+    el!=null?' ・ 麻酔 '+el+'分':''}${oel!=null&&!c.chart.opeStop?' ・ 手術 '+oel+'分':''}`);
   const st=[['anesStart','導入'],['intubation','挿管'],['opeStart','手術開始'],['opeStop','手術終了'],['anesStop','抜管']];
   const cell=k=>{const v=(c.chart.v[recTime]||{})[k]; return v==null||v===''?'—':v};
   /* 誰の責任で誰が記録しているかを、麻酔記録の画面に常に出す */
@@ -1409,7 +1431,7 @@ function viewRec(M){
       ${[['vital','バイタル'],['machine','麻酔器'],['dose','投薬'],['event','イベント']]
         .map(([k,l])=>`<button class="${recTab===k?'on':''}" onclick="recTab='${k}';render()">${l}</button>`).join('')}
     </div>
-    ${recTab==='vital'?`<div class="vfields">${VITALS.map(v=>`
+    ${recTab==='vital'?`<div class="vfields">${[...VITALS,...EXTRA].map(v=>`
       <div class="vf" onclick="kpOpen('${v.k}')"><div class="k">${v.l}<span class="muted"> ${v.u}</span></div>
       <div class="v ${cell(v.k)==='—'?'e':''}">${cell(v.k)}</div></div>`).join('')}</div>`:''}
     ${recTab==='machine'?`${machCopyBar(c)}<div class="vfields">${MACHINE.map(v=>`
@@ -1421,6 +1443,8 @@ function viewRec(M){
       <div class="row" style="margin-top:9px">
         <button class="btn sm" onclick="freeNote()">＋ メモ</button>
         <button class="btn sm primary" onclick="alertEdit('')">⏰ 通知を追加</button></div>
+      <div class="row" style="margin-top:6px">${ALERT_QUICK.map((q,i)=>
+        `<button class="btn sm" onclick="alertQuick(${i})">⏰ ${esc(q.l)}（${q.iv}分）</button>`).join('')}</div>
       ${alertsOf(c).length?'':'<p class="muted" style="font-size:12px;margin:8px 0 0">抗生物質の追加（○分おき）や、体位変換（○分後に1回）などを設定できます。</p>'}`:''}
   </div>
 
@@ -1445,7 +1469,7 @@ function viewRec(M){
     n.querySelectorAll('button').forEach(b=>b.onclick=()=>setRoute(b.dataset.v));
     const g=document.getElementById('d_cat');
     g.querySelectorAll('button').forEach(b=>b.onclick=()=>setCat(b.dataset.v));
-    onDrugPick();
+    doseRestore();
   }
 }
 function shiftT(m){ recTime=m2hm((hm2m(recTime)||nowMin())+m); render(); }
@@ -1522,10 +1546,11 @@ function stampClear(k){
 function addEvent(k){
   const c=cur, e=EVENTS.find(x=>x.k===k);
   if(e.stamp){ stamp(e.stamp); return; }
-  const t=nowHM();
-  c.events.push({k:uid(),t,kk:k,l:e.l});
-  if(e.abx){ askAbx(t); }
-  recTime=t; save(); render(); toast(`${e.l} ${t}（記録一覧の時刻をタップで直せます）`);
+  const t=nowHM(), key=uid();
+  c.events.push({k:key,t,kk:k,l:e.l});
+  if(e.abx){ askAbx(t,key); }
+  recTime=t; save(); render();
+  toast(`${e.l} ${t}（記録一覧をタップで、メモ・時刻を直せます）`);
 }
 /* 記録一覧から時刻を直す（イベント・投薬） */
 function editTime(kind,i){
@@ -1614,13 +1639,17 @@ function drugGroups(c){
 }
 /* 分類ごとにまとめた選択肢 */
 function doseOptions(gs){
-  let html='', cur=null;
+  let html='', cur=null, n=0;
+  const q=(doseQ||'').trim().toLowerCase();
   gs.forEach((o,i)=>{
+    if(q&&((o.n||'')+' '+(o.cat||'')).toLowerCase().indexOf(q)<0) return;
     const lab=o._p?'準備した薬':(o.cat||'その他');
     if(lab!==cur){ if(cur!==null)html+='</optgroup>'; html+=`<optgroup label="${esc(lab)}">`; cur=lab; }
-    html+=`<option value="${i}">${esc(o.n)}${o.cri?'（CRI）':''}${
+    n++;
+    html+=`<option value="${i}"${gkey(o)===doseKey?' selected':''}>${esc(o.n)}${o.cri?'（CRI）':''}${
       potency(o)?'　'+esc(potency(o)):''}${o.warn?'　⚠':''}</option>`;
   });
+  if(!n) return '<option value="">（見つかりません）</option>';
   return html+(cur===null?'':'</optgroup>');
 }
 const poDoses=c=>c.doses.filter(d=>d.po).sort((a,b)=>String(a.t).localeCompare(String(b.t)));
@@ -1632,6 +1661,8 @@ function doseForm(c,t0){
   const tv=t0==null?recTime:t0;   /* let 宣言は window に乗らないため、直接参照する */
   return `<div class="grid" style="gap:8px">
     <label class="f"><span>薬剤（力価）</span>
+      <input id="d_q" placeholder="薬剤名でしぼる" value="${esc(doseQ)}" oninput="doseSearch(this.value)"
+        style="margin-bottom:6px">
       <select id="d_name" onchange="onDrugPick()">${doseOptions(doseGroups)}</select></label>
     <label class="f"><span>投与量</span>
       <select id="d_dose" onchange="onDosePick()"></select></label>
@@ -1642,7 +1673,8 @@ function doseForm(c,t0){
     <div class="volbox" id="d_vol"></div>
     <div class="row">
       <label class="f" style="flex:1;min-width:110px"><span>実投与量</span>
-        <div class="row" style="gap:6px"><input id="d_amt" inputmode="decimal" style="flex:1;min-width:70px">
+        <div class="row" style="gap:6px"><input id="d_amt" inputmode="decimal" style="flex:1;min-width:70px"
+          oninput="doseAmt=this.value">
         <span id="d_amtu" style="font-weight:800;color:var(--ink2)">mL</span></div></label>
       <label class="f" style="flex:1;min-width:120px"><span>時刻</span>
         <input type="time" id="d_t" value="${esc(tv)}" onchange="onTimePick()"></label>
@@ -1655,7 +1687,41 @@ function doseForm(c,t0){
   </div>`;
 }
 let doseGroups=[], doseRoute='', doseCat='';
+/* ---- 入力中の状態 ----
+   画面は30秒ごとに描き直され、遠隔から記録が届いたときにも描き直されます。
+   そのたびに選択が消えて先頭の薬（アトロピン）に戻っていたので、
+   選んでいる薬・投与量・実投与量を覚えておいて、描き直しのあとに戻します。 */
+let doseKey='', doseIdx='', doseCust='', doseUnit='', doseAmt='', doseQ='';
+const gkey=o=>o?o.n+'|'+(o.conc==null?'-':o.conc)+(o.cri?'|cri':''):'';
 const curGroup=()=>doseGroups[+((document.getElementById('d_name')||{}).value||0)];
+/* 描き直しのあとに呼びます。薬が変わっていなければ、入力中の内容をそのまま戻します */
+function doseRestore(){
+  const sel=document.getElementById('d_name'); if(!sel) return;
+  const o=curGroup();
+  if(!o||gkey(o)!==doseKey){ onDrugPick(); return; }
+  const s=document.getElementById('d_dose');
+  s.innerHTML=o.doses.map((d,i)=>`<option value="${i}">${esc(d.txt)}</option>`).join('')
+    +'<option value="x">その他（数値を入力）</option>';
+  s.value=(doseIdx==='x'||(doseIdx!==''&&+doseIdx<o.doses.length))?doseIdx:(o.doses.length?'0':'x');
+  doseIdx=s.value;
+  const u=document.getElementById('d_unit');
+  if(u){ u.innerHTML=unitChoices(o).map(x=>`<option>${x}</option>`).join('');
+         if(doseUnit&&[...u.options].some(x=>x.value===doseUnit)) u.value=doseUnit; }
+  const cu=document.getElementById('d_cust'); if(cu) cu.value=doseCust;
+  document.getElementById('d_cwrap').classList.toggle('hide',s.value!=='x');
+  setRoute(doseRoute); setCat(doseCat);
+  calcVol();
+  /* 丸めて入れた量は、計算値より優先します */
+  const amt=document.getElementById('d_amt');
+  if(amt&&doseAmt!=='') amt.value=doseAmt;
+}
+/* 薬剤名でしぼり込む。選んでいた薬が残っていれば選択は保たれます */
+function doseSearch(v){
+  doseQ=v;
+  const s=document.getElementById('d_name'); if(!s) return;
+  s.innerHTML=doseOptions(doseGroups);
+  doseRestore();
+}
 /* CRI は mcg/kg/hr のような速度、それ以外は mg/kg で入れます */
 function unitChoices(o){
   const a=(o&&o.cri)?['mcg/kg/h','mcg/kg/min','mg/kg/h','mg/kg/min']:['mg/kg','mcg/kg'];
@@ -1669,6 +1735,8 @@ function unitChoices(o){
 }
 function onDrugPick(){
   const o=curGroup(); if(!o)return;
+  /* 薬を選び直したので、投与量・実投与量は入れ直しになります */
+  doseKey=gkey(o); doseIdx=''; doseCust=''; doseUnit=''; doseAmt='';
   const s=document.getElementById('d_dose');
   s.innerHTML=o.doses.map((d,i)=>`<option value="${i}">${esc(d.txt)}</option>`).join('')
     +'<option value="x">その他（数値を入力）</option>';
@@ -1680,6 +1748,7 @@ function onDrugPick(){
 }
 function onDosePick(){
   const o=curGroup(), s=document.getElementById('d_dose');
+  doseIdx=s?s.value:''; doseAmt='';
   const custom=s.value==='x';
   document.getElementById('d_cwrap').classList.toggle('hide',!custom);
   const d=custom?null:(o&&o.doses[+s.value]);
@@ -1707,6 +1776,9 @@ function selDose(){
 function calcVol(){
   const o=curGroup(), sd=selDose(), w=bw(cur), box=document.getElementById('d_vol');
   if(!box) return;
+  /* 「その他」の数値と単位も覚えておきます（描き直しで消えないように） */
+  const c0=document.getElementById('d_cust'); if(c0) doseCust=c0.value;
+  const u0=document.getElementById('d_unit'); if(u0) doseUnit=u0.value;
   const amt=document.getElementById('d_amt'), lab=document.getElementById('d_amtu');
   const dose=sd&&sd.dose;
   const dTxt=dose?`${dnum(dose.v)}${dose.u.replace(/\/h$/,'/hr')}`:'—';
@@ -1766,16 +1838,30 @@ function addDose(){
   const last=cur.doses[cur.doses.length-1];
   if(last.by&&cur.meta.anesthetist&&last.by!==cur.meta.anesthetist) last.ord=cur.meta.anesthetist;
   const d=ALLDRUGS.find(x=>x.n===o.n);
-  if(d&&d.abx){ cur.events.push({k:uid(),t,kk:'abx',l:'抗生物質投与'}); askAbx(t); }
+  if(d&&d.abx){ const ek=uid(); cur.events.push({k:ek,t,kk:'abx',l:'抗生物質投与'}); askAbx(t,ek); }
+  doseAmt='';   /* 次の記録は、また計算値から始めます */
   save(); render(); toast(`${o.n} ${a} mL ${doseRoute||''} を ${t} で記録`);
 }
 
 /* ================= 通知（リマインダー） =================
    抗生物質の追加投与のように「○分おき」、体位変換のように「○分後に1回」の
    どちらも設定できます。麻酔記録の画面に帯で出て、時間になると端末が通知します。 */
-const ALERT_PRESETS=['抗生物質の追加','血液ガス測定','ACT測定','体位変換','眼軟膏','カフ圧の確認',
-  '保温の確認','尿量の確認','輸液量の確認','バイタル記録'];
-const ALERT_IVS=[15,30,45,60,90,120];
+const ALERT_PRESETS=['バイタル記録','SpO2クリップの位置を変える','抗生物質の追加','血液ガス測定','ACT測定',
+  '体位変換','眼軟膏','カフ圧の確認','保温の確認','尿量の確認','輸液量の確認'];
+const ALERT_IVS=[5,10,15,30,45,60,90,120];
+/* よく使う通知は、1タップで置けるようにします */
+const ALERT_QUICK=[
+  {l:'バイタル記録',              iv:5,  rep:true},
+  {l:'SpO2クリップの位置を変える', iv:60, rep:true}
+];
+function alertQuick(i){
+  const q=ALERT_QUICK[i]; if(!q||!cur) return;
+  const c=cur, had=(c.alerts||[]).find(a=>a.l===q.l);
+  if(had){ had.at=nowHM(); had.n=0; had.on=true; delete ALERT_FIRED[c.id+'|'+had.k];
+    save(); render(); toast(`${q.l}：${had.at} から ${had.iv}分おき`); return; }
+  c.alerts.push({k:uid(),l:q.l,iv:q.iv,rep:q.rep,at:nowHM(),n:0,on:true});
+  save(); render(); toast(`${q.l}：${q.iv}分おきで置きました`);
+}
 /* 通知を出したかどうかは端末ごとに覚えます（同期で往復させないため） */
 const ALERT_FIRED={};
 const alertsOf=c=>(c.alerts||[]).filter(a=>a&&a.on!==false&&a.iv>0);
@@ -1890,11 +1976,11 @@ function askNotify(){
   try{ if('Notification' in window&&Notification.permission==='default') Notification.requestPermission(); }catch(e){}
 }
 /* 抗生物質を記録したときは、この画面を出して間隔を決めてもらいます */
-function askAbx(t){
+function askAbx(t,ev){
   const c=cur, a=(c.alerts||[]).find(x=>x.src==='abx');
-  if(a){ a.at=t||nowHM(); a.n=0; delete ALERT_FIRED[c.id+'|'+a.k];
+  if(a){ a.at=t||nowHM(); a.n=0; if(ev) a.ev=ev; delete ALERT_FIRED[c.id+'|'+a.k];
     save(); render(); toast(`抗生物質：${a.at} から ${a.iv}分おき`); return; }
-  alertDraft={k:'',l:'抗生物質の追加',iv:90,rep:true,at:t||nowHM(),n:0,on:true,src:'abx'};
+  alertDraft={k:'',l:'抗生物質の追加',iv:90,rep:true,at:t||nowHM(),n:0,on:true,src:'abx',ev:ev||''};
   alertForm();
 }
 
@@ -1946,7 +2032,9 @@ const PANELS=[
   ser:[{k:'etco2',l:'EtCO2',m:'s'},{k:'rr',l:'呼吸数',m:'x'}],
   r:{min:80,max:100,step:5,u:'%',ser:[{k:'spo2',l:'SpO2→右',m:'c'}]}},
  {k:'temp',l:'体温',u:'℃',min:35,max:41,step:1,h:104,
-  ser:[{k:'temp',l:'体温',m:'c'}]}
+  ser:[{k:'temp',l:'体温',m:'c'}]},
+ {k:'pi',l:'PI',u:'%',min:0,max:10,step:2,h:80,
+  ser:[{k:'pi',l:'PI（灌流指標）',m:'t'}]}
 ];
 /* 印（●■▲◆×）。色だけに頼らず形でも区別できるようにします */
 function mk(m,x,y,c,r){
@@ -2037,10 +2125,13 @@ function vchart(c){
 
   const HEAD=bands.length?20:0;
   const BAND=bands.length?bands.length*BH+HEAD+8:0;
-  const panels=PANELS.map(p=>({...p,
-    ser:p.ser.filter(x=>plotOn(x.k)),
-    r:p.r?{...p.r,ser:p.r.ser.filter(x=>plotOn(x.k))}:null}))
+  /* 記録のある項目だけを描きます（使っていない帯で紙が埋まらないように） */
+  const hasK=k=>Object.keys(V).some(t=>V[t][k]!=null&&V[t][k]!=='');
+  let panels=PANELS.map(p=>({...p,
+    ser:p.ser.filter(x=>plotOn(x.k)&&hasK(x.k)),
+    r:p.r?{...p.r,ser:p.r.ser.filter(x=>plotOn(x.k)&&hasK(x.k))}:null}))
     .filter(p=>p.ser.length||(p.r&&p.r.ser.length));
+  if(!panels.length) panels=[{...PANELS[0],ser:PANELS[0].ser.filter(x=>plotOn(x.k)),r:null}];
   const PT=BAND+6, PH=panels.reduce((a,p)=>a+p.h+8,0);
   const AXY=PT+PH+2, AXH=a0!=null?34:22;
   const DSY=AXY+AXH, DSH=dsRows*(FS+4);
@@ -2152,29 +2243,150 @@ function vchart(c){
 function logRows(c){
   const rows=[];
   Object.keys(c.chart.v).forEach(t=>{
-    const o=c.chart.v[t], parts=[...VITALS,...MACHINE].filter(v=>o[v.k]!=null&&o[v.k]!=='')
+    const o=c.chart.v[t], parts=allFields().filter(v=>o[v.k]!=null&&o[v.k]!=='')
       .map(v=>`${v.l} ${o[v.k]}`);
     if(parts.length) rows.push({t,tag:'',b:parts.join(' ・ '),kind:'v'});
   });
-  c.events.forEach((e,i)=>rows.push({t:e.t,tag:'イベント',b:e.l,kind:'e',i}));
+  c.events.forEach((e,i)=>rows.push({t:e.t,tag:'イベント',
+    b:e.l+(e.memo?` — ${e.memo}`:''),kind:'e',i}));
   c.doses.forEach((d,i)=>{ const pk=perKg(d,bw(c));
     rows.push({t:d.t,tag:'投薬',
     b:`${d.name} ${pk||''}${d.amt?`（${d.amt} ${d.unit||'mL'}）`:''}${d.route?' '+d.route:''}`
       +(d.by?` ・ ${d.by}${d.ord?`（指示 ${d.ord}）`:''}`:''),kind:'d',i}); });
   rows.sort((a,b)=>String(a.t).localeCompare(String(b.t)));
   if(!rows.length) return '<div class="empty">まだ記録がありません</div>';
-  return rows.map(r=>`<div class="logrow">${r.kind==='v'
-      ?`<span class="t">${esc(r.t)}</span>`
-      :`<button class="t tbtn" onclick="editTime('${r.kind}',${r.i})" title="時刻を直す">${esc(r.t)}</button>`}
-    ${r.tag?`<span class="tag ${r.kind==='e'?'ev':'dg'}">${r.tag}</span>`:''}
-    <span class="b">${esc(r.b)}</span>
-    ${r.kind!=='v'?`<button class="x" onclick="delLog('${r.kind}',${r.i})">×</button>`:''}</div>`).join('');
+  /* 行をタップするとその場で直せます（時刻を合わせ直したり、消して作り直す必要がありません） */
+  return rows.map(r=>{
+    const go=r.kind==='v'?`editVital('${esc(r.t)}')`:`editLog('${r.kind}',${r.i})`;
+    return `<div class="logrow tap" onclick="${go}">
+      <span class="t">${esc(r.t)}</span>
+      ${r.tag?`<span class="tag ${r.kind==='e'?'ev':'dg'}">${r.tag}</span>`:''}
+      <span class="b">${esc(r.b)}</span>
+      <span class="x" aria-hidden="true">›</span></div>`;
+  }).join('');
 }
-function delLog(kind,i){ if(kind==='e')cur.events.splice(i,1); else cur.doses.splice(i,1); save(); render(); }
+
+/* ---- 記録一覧からの編集 ---- */
+function editLog(kind,i){ kind==='e'?editEvent(i):editDose(i); }
+function editEvent(i){
+  const e=cur.events[i]; if(!e) return;
+  const ev=EVENTS.find(x=>x.k===evKind(e));
+  openModal(`<h2>イベント</h2>
+   <div class="grid g2">
+     <label class="f"><span>時刻</span><input type="time" id="ee_t" value="${esc(e.t||'')}"></label>
+     <label class="f"><span>内容</span><input id="ee_l" value="${esc(e.l||'')}" maxlength="40"></label>
+   </div>
+   <label class="f" style="margin-top:8px"><span>メモ</span>
+     <input id="ee_m" value="${esc(e.memo||'')}" placeholder="例）VPC 連発、リドカイン準備" maxlength="80"></label>
+   ${ev&&ev.stamp?'<p class="muted" style="font-size:12px;margin:8px 0 0">時刻を直すと、上の5つのボタンの時刻も一緒に直ります。</p>':''}
+   <div class="row" style="margin-top:12px">
+     <button class="btn sp" onclick="closeModal()">キャンセル</button>
+     <button class="btn primary sp" onclick="editEventOk(${i})">直す</button></div>
+   <div class="row" style="margin-top:8px">
+     <button class="btn danger sp" onclick="delLog('e',${i})">このイベントを削除</button></div>`);
+  setTimeout(()=>{const n=document.getElementById('ee_m'); if(n&&!e.memo)n.focus();},80);
+}
+function editEventOk(i){
+  const e=cur.events[i]; if(!e) return;
+  const t=document.getElementById('ee_t').value, l=document.getElementById('ee_l').value.trim();
+  if(!t){ toast('時刻を入れてください'); return; }
+  if(!l){ toast('内容を入れてください'); return; }
+  const old=e.t, ev=EVENTS.find(x=>x.k===evKind(e));
+  e.t=t; e.l=l;
+  const m=document.getElementById('ee_m').value.trim();
+  if(m) e.memo=m; else delete e.memo;
+  /* 5つの時刻と連動しているイベントは、そちらも一緒に直します */
+  if(ev&&ev.stamp&&cur.chart[ev.stamp]===old){ cur.chart[ev.stamp]=t;
+    if(ev.stamp==='anesStart'&&cur.chart.start===old) cur.chart.start=t; }
+  save(); closeModal(); render(); toast('直しました');
+}
+function editDose(i){
+  const d=cur.doses[i]; if(!d) return;
+  openModal(`<h2>投薬</h2>
+   <p class="muted" style="font-size:13px;margin:0 0 10px">${esc(d.name)}${
+     d.pot?` ・ ${esc(d.pot)}`:''}${perKg(d,bw(cur))?` ・ ${esc(perKg(d,bw(cur)))}`:''}</p>
+   <div class="grid g2">
+     <label class="f"><span>時刻</span><input type="time" id="ed_t" value="${esc(d.t||'')}"></label>
+     <label class="f"><span>実投与量（${esc(d.unit||'mL')}）</span>
+       <input id="ed_a" inputmode="decimal" value="${esc(d.amt||'')}"></label>
+   </div>
+   <label class="f" style="margin-top:8px"><span>投与経路</span>
+     <div class="chips" id="ed_r">${ROUTES.map(r=>
+       `<button data-v="${r}" class="${d.route===r?'on':''}">${r}</button>`).join('')}</div></label>
+   <div class="row" style="margin-top:12px">
+     <button class="btn sp" onclick="closeModal()">キャンセル</button>
+     <button class="btn primary sp" onclick="editDoseOk(${i})">直す</button></div>
+   <div class="row" style="margin-top:8px">
+     <button class="btn danger sp" onclick="delLog('d',${i})">この投薬を削除</button></div>`);
+  const n=document.getElementById('ed_r');
+  n.querySelectorAll('button').forEach(b=>b.onclick=()=>{
+    n.querySelectorAll('button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); });
+}
+function editDoseOk(i){
+  const d=cur.doses[i]; if(!d) return;
+  const t=document.getElementById('ed_t').value;
+  if(!t){ toast('時刻を入れてください'); return; }
+  d.t=t; d.amt=document.getElementById('ed_a').value.trim();
+  const r=document.querySelector('#ed_r button.on');
+  if(r) d.route=r.dataset.v;
+  save(); closeModal(); render(); toast('直しました');
+}
+/* その時刻に入っている値を、タップで入れ直せます */
+function editVital(t){
+  const o=cur.chart.v[t]||{};
+  const list=allFields().filter(v=>o[v.k]!=null&&o[v.k]!=='');
+  openModal(`<h2>${esc(t)} の記録</h2>
+   <p class="muted" style="font-size:12.5px;margin:0 0 8px">値をタップすると入れ直せます。</p>
+   ${list.length?list.map(v=>`<div class="drow" style="cursor:pointer"
+       onclick="closeModal();recTime='${esc(t)}';recTab='${MACHINE.some(m=>m.k===v.k)?'machine':'vital'}';render();kpOpen('${v.k}')">
+       <div class="nm"><b>${esc(v.l)}</b><small>${esc(v.u)}</small></div>
+       <div class="vol">${esc(String(o[v.k]))}</div></div>`).join('')
+     :'<div class="empty">値がありません</div>'}
+   <label class="f" style="margin-top:10px"><span>この時刻をまとめて動かす</span>
+     <input type="time" id="vt_t" value="${esc(t)}"></label>
+   <div class="row" style="margin-top:12px">
+     <button class="btn sp" onclick="closeModal()">閉じる</button>
+     <button class="btn primary sp" onclick="moveVital('${esc(t)}')">この時刻に移す</button></div>
+   <div class="row" style="margin-top:8px">
+     <button class="btn danger sp" onclick="delVital('${esc(t)}')">この時刻の記録を削除</button></div>`);
+}
+function moveVital(t){
+  const nt=document.getElementById('vt_t').value;
+  if(!nt||nt===t){ closeModal(); return; }
+  const src=cur.chart.v[t]||{};
+  cur.chart.v[nt]=Object.assign({},cur.chart.v[nt]||{},src);
+  delete cur.chart.v[t];
+  recTime=nt; save(); closeModal(); render(); toast(`${t} → ${nt} に移しました`);
+}
+function delVital(t){
+  const n=Object.keys(cur.chart.v[t]||{}).length;
+  if(!confirm(`${t} の記録（${n}項目）を削除しますか？`)) return;
+  delete cur.chart.v[t]; save(); closeModal(); render(); toast(`${t} の記録を削除しました`);
+}
+/* イベントを消すときは、そのイベントから作った通知も一緒に消します
+   （抗生物質を押し間違えたときに、通知だけ残って鳴り続けないように） */
+function delLog(kind,i){
+  if(kind==='e'){
+    const e=cur.events[i]; if(!e) return;
+    const gone=(cur.alerts||[]).filter(a=>
+      (a.ev&&a.ev===e.k)||(evKind(e)==='abx'&&a.src==='abx'&&!a.ev));
+    if(gone.length){
+      cur.alerts=cur.alerts.filter(a=>gone.indexOf(a)<0);
+      gone.forEach(a=>delete ALERT_FIRED[cur.id+'|'+a.k]);
+    }
+    cur.events.splice(i,1);
+    save(); closeModal(); render();
+    toast(gone.length?`イベントと通知 ${gone.length}件 を消しました`:`${e.l} を消しました`);
+    return;
+  }
+  const d=cur.doses[i];
+  cur.doses.splice(i,1); save(); closeModal(); render();
+  toast(d?`${d.name} を消しました`:'削除しました');
+}
 
 /* --- キーパッド --- */
 let kpKey='',kpBuf='';
-const allFields=()=>[...VITALS,...MACHINE];
+const allFields=()=>[...VITALS,...MACHINE,...EXTRA];
 function kpOpen(k){
   kpKey=k; const d=allFields().find(x=>x.k===k);
   kpBuf=String((cur.chart.v[recTime]||{})[k]??'');
@@ -2369,7 +2581,7 @@ function viewPostop(M){
   const n=document.getElementById('d_route');
   if(n){ n.querySelectorAll('button').forEach(b=>b.onclick=()=>setRoute(b.dataset.v));
     document.getElementById('d_cat').querySelectorAll('button').forEach(b=>b.onclick=()=>setCat(b.dataset.v));
-    onDrugPick(); }
+    doseRestore(); }
 }
 /* 間隔は稼働中でも変更でき、次の通知からすぐ反映されます */
 function poSetInt(v){
@@ -2874,14 +3086,31 @@ async function pushTally(){
   if(!url){ toast('設定で手術集計シートのURLを登録してください'); openSettings(); return; }
   const miss=tallyMissing(cur);
   if(miss.length){ toast(`${miss.join('・')} が未入力のため書き出せません`); return; }
+  /* 失敗したときに「なぜ」が分かるように、返ってきた内容まで見て知らせます */
   try{ tlog('送信中…');
     const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({action:'appendTally',rows:[tallyRow(cur)]})});
-    const j=JSON.parse(await r.text());
+    const body=await r.text();
+    let j=null; try{ j=JSON.parse(body); }catch(e){}
+    if(!j){
+      const why=/accounts\.google\.com|ServiceLogin|ログイン|Sign in/i.test(body)
+        ? 'Apps Script がログインを求めています。\nデプロイの「アクセスできるユーザー」を［全員］にしてください。'
+        : /script\.google\.com|<html/i.test(body)
+        ? 'シートの代わりに Google のページが返ってきました。\n・URL が /exec で終わっているか\n・デプロイが有効か\nをご確認ください。'
+        : 'シートからの返事が読めませんでした。';
+      tlog('失敗：'+why+'\n返事の先頭：'+body.slice(0,80));
+      toast('書き込めませんでした。理由が下に出ています'); return;
+    }
     if(j.ok){ cur.meta.tallyAt=new Date().toISOString(); save();
       tlog(`「${j.sheet}」に 追加${j.written} / 更新${j.updated}`); toast(`${siteName()}「${j.sheet}」に書き込みました`); }
-    else { tlog('エラー: '+(j.error||'不明')); toast('書き込みに失敗しました'); }
-  }catch(e){ tlog('失敗: '+e.message); toast('書き込めませんでした。コピーで貼り付けてください'); }
+    else { tlog('シート側のエラー：'+(j.error||'不明')); toast('書き込みに失敗しました。理由が下に出ています'); }
+  }catch(e){
+    const off=(typeof navigator!=='undefined'&&navigator.onLine===false);
+    tlog('失敗：'+(off?'オフラインです。回線が戻ってからもう一度お試しください。'
+      :'シートに届きませんでした。\n・デプロイの「アクセスできるユーザー」が［全員］か\n・URL が /exec で終わっているか\nをご確認ください。')
+      +'\n'+String(e.message||e));
+    toast('書き込めませんでした。理由が下に出ています');
+  }
 }
 
 /* 時間・バイタル・イベントを全て縦持ちで書き出す */
