@@ -13,7 +13,7 @@
   --bg:#eef1f5; --panel:#fff; --line:#dbe2ea; --line2:#eef1f5;
   --ink:#101d2b; --ink2:#5d6c7d; --accent:#0d6e8c; --accent2:#e9f4f8;
   --warn:#c0392b; --ok:#15794a; --amber:#a86a00;
-  --hr:#c0392b; --bp:#1f5fb0; --rr:#15794a; --spo2:#7b3fa0; --etco2:#a05a00; --temp:#0d6e8c;
+  --hr:#c0392b; --bp:#1f5fb0; --rr:#15794a; --spo2:#7b3fa0; --etco2:#a05a00; --temp:#0d6e8c; --etiso:#8a7400;
   --sys:#1f4e9c; --map:#2e86c1; --dia:#6a9fd4;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -132,6 +132,15 @@ label.f>span{display:block;font-size:11.5px;font-weight:700;color:var(--ink2);ma
 .vf .k{font-size:10.5px;font-weight:800;color:var(--ink2)}
 .vf .v{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;min-height:25px;line-height:1.25}
 .vf .v.e{color:#c3ccd6}
+.vsec{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:800;color:var(--ink2);margin:9px 0 5px}
+.vsec:first-child{margin-top:2px}
+.vsec b{font-variant-numeric:tabular-nums;background:#eef3f8;border-radius:999px;padding:1px 8px;color:#5c6b7a}
+.vsec b.ok{background:#e6f6ed;color:#1c7a46}
+.prow{border:1px solid var(--line);border-radius:12px;padding:9px 10px;margin-bottom:9px;background:#fff}
+.prow>b{display:block;font-size:13.5px;margin-bottom:6px}
+.prow input{width:100%}
+.prewarn{border:1px solid #f0c98a;background:#fff8ec;border-radius:12px;padding:10px 12px;margin-bottom:10px}
+.stampbar button.off{opacity:.45}
 .abx{display:flex;align-items:center;gap:8px;border:1px solid #f0dcae;background:#fff8e6;border-radius:10px;
   padding:7px 9px;margin-top:8px;font-size:12px;font-weight:700;color:var(--amber);flex-wrap:wrap}
 .abx.due{border-color:#eccdc8;background:#fdeae7;color:var(--warn);animation:pl 1.2s ease-in-out infinite}
@@ -295,7 +304,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v3.1 (2026-09-23)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.2 (2026-09-24)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -585,6 +594,8 @@ function applyDrugDB(d){
       conc:(x.conc==null||x.conc===''?null:+x.conc), cunit:x.cunit||'mg/ml',
       dose:(x.dose==null||x.dose===''?null:+x.dose), dunit:du,
       route:x.route||'', dil:x.dil||dilOf(x.n||''), note:x.note||'', warn:x.warn||'',
+      cands:Array.isArray(x.cands)?x.cands.map(q=>({v:+q.v,u:String(q.u||du)}))
+        .filter(q=>isFinite(q.v)):[],
       cri:(x.cri!==undefined?!!x.cri:/\/(h|hr|min)$/.test(du)),
       per:x.per||(/\/min$/.test(du)?'min':(/\/(h|hr)$/.test(du)?'h':''))};
   }).filter(x=>x.n);
@@ -771,24 +782,36 @@ const SITE=()=>SITES[siteName()];
 
 /* バイタル項目 */
 const VITALS=[
- {k:'hr',  l:'HR',   u:'bpm',  c:'var(--hr)',   max:220, plot:1},
- {k:'sys', l:'SYS',  u:'mmHg', c:'var(--sys)',  max:220, plot:1},
- {k:'dia', l:'DIA',  u:'mmHg', c:'var(--dia)',  max:220, plot:1},
- {k:'map', l:'MAP',  u:'mmHg', c:'var(--map)',  max:220, plot:1},
- {k:'rr',  l:'RR',   u:'/min', c:'var(--rr)',   max:220, plot:1},
- {k:'spo2',l:'SpO2', u:'%',    c:'var(--spo2)', max:100, plot:1},
- {k:'etco2',l:'EtCO2',u:'mmHg',c:'var(--etco2)',max:100, plot:1},
- {k:'temp',l:'Temp', u:'℃',   c:'var(--temp)', max:45,  plot:1},
+ {k:'hr',  l:'HR',   u:'bpm',  c:'var(--hr)',   max:220, plot:1, core:1},
+ {k:'sys', l:'SYS',  u:'mmHg', c:'var(--sys)',  max:220, plot:1, core:1},
+ {k:'dia', l:'DIA',  u:'mmHg', c:'var(--dia)',  max:220, plot:1, core:1},
+ {k:'map', l:'MAP',  u:'mmHg', c:'var(--map)',  max:220, plot:1, core:1},
+ {k:'rr',  l:'RR',   u:'/min', c:'var(--rr)',   max:220, plot:1, core:1},
+ {k:'spo2',l:'SpO2', u:'%',    c:'var(--spo2)', max:100, plot:1, core:1},
+ {k:'etco2',l:'EtCO2',u:'mmHg',c:'var(--etco2)',max:100, plot:1, core:1},
+ {k:'etiso',l:'EtIso',u:'%',   c:'var(--etiso)',max:8,   plot:1, core:1},
+ {k:'temp',l:'Temp', u:'℃',   c:'var(--temp)', max:45,  plot:1, core:1},
  {k:'pi',  l:'PI',   u:'%',    c:'var(--spo2)', max:20,  plot:1}
 ];
+/* core を付けた9項目が「5分ごとに記録する」ものです。残りは「そのほか」に分けて出します */
 /* 麻酔器・人工呼吸器・輸液 */
 const MACHINE=[
+ {k:'vmode',l:'換気モード',u:'',opt:['自発呼吸','PCV','VCV','PSV','SIMV']},
  {k:'iso', l:'Iso',   u:'%'},        {k:'o2',  l:'O2',    u:'L/min'},
  {k:'air', l:'Air',   u:'L/min'},    {k:'fluid',l:'輸液',  u:'mL/kg/hr'},
  {k:'fio2',l:'FiO2',  u:'%'},        {k:'vt',  l:'VT',    u:'mL'},
  {k:'pip', l:'PIP',   u:'hPa'},      {k:'peep',l:'PEEP',  u:'hPa'},
  {k:'rrset',l:'換気回数',u:'/min'},  {k:'ie',  l:'I:E',   u:'1:x'}
 ];
+/* 麻酔を始める前に確認する検査。4項目そろうまで「導入」は押せません。
+   実施していない検査は、理由を選べば先に進めます（緊急症例で止まらないように） */
+const PRECHK=[{k:'phys',l:'身体検査'},{k:'blood',l:'血液検査'},
+              {k:'xray', l:'X線検査'},{k:'echo', l:'エコー検査'}];
+const PRENG=['緊急のため','飼い主の希望','他院で実施済み','実施できなかった','必要ないと判断'];
+const preOne=(c,k)=>((c&&c.pre)||{})[k]||{};
+const preItemOk=(c,k)=>{ const o=preOne(c,k); return o.s==='done'||(o.s==='skip'&&!!o.r); };
+const preOk=c=>PRECHK.every(x=>preItemOk(c,x.k));
+const preCount=c=>PRECHK.filter(x=>preItemOk(c,x.k)).length;
 /* そのほかの記録。バイタルと同じ画面で入れられますが、グラフには出しません */
 const EXTRA=[
  {k:'bleed',l:'出血量', u:'mL'},     {k:'glu', l:'血糖',   u:'mg/dL'},
@@ -845,7 +868,7 @@ function blank(){
   return {id:newId(),
     meta:{date:today(),patientName:'',patientId:'',bw:'',species:'犬',breed:'',age:'',sex:'',
           findings:[],comorbid:[],risk:'',procedure:'',dept:'',site:siteName()},
-    prep:{items:[],doneAt:''},
+    pre:{}, prep:{items:[],doneAt:''},
     chart:{start:'',anesStart:'',intubation:'',opeStart:'',opeStop:'',anesStop:'',v:{}},
     events:[], doses:[], alerts:[],
     postop:{on:false,interval:30,lastAt:'',rows:[],by:'',stoppedAt:''},
@@ -854,6 +877,7 @@ function blank(){
 }
 function fix(c){
   c.meta=c.meta||{}; c.meta.findings=c.meta.findings||[]; c.meta.comorbid=c.meta.comorbid||[];
+  c.pre=c.pre||{};
   c.prep=c.prep||{items:[],doneAt:''}; c.prep.items=c.prep.items||[];
   c.chart=c.chart||{}; c.chart.v=c.chart.v||{};
   c.events=c.events||[]; c.doses=c.doses||[]; c.alerts=c.alerts||[];
@@ -1412,8 +1436,10 @@ function viewRec(M){
     <button onclick="switchUser()">記録 <b>${me?esc(me):'—'}</b>${me&&vet&&me!==vet?'<em> 指示のもと</em>':''} ⇄</button>
   </div>
   <div class="card">
+    ${c.chart.anesStart?'':preBox(c)}
     <div class="stampbar">${st.map(([k,l])=>`
-      <button class="${c.chart[k]?'on':''}" onclick="stamp('${k}')">${l}<b>${c.chart[k]||'--:--'}</b></button>`).join('')}</div>
+      <button class="${c.chart[k]?'on':''}${k==='anesStart'&&!c.chart[k]&&!preOk(c)?' off':''}"
+        onclick="stamp('${k}')">${l}<b>${c.chart[k]||'--:--'}</b></button>`).join('')}</div>
     ${t.anes!=null||t.ind!=null?`<div class="row muted" style="font-size:11.5px;margin-top:7px;gap:11px">
       <span>導入＋移動 <b>${t.ind??'—'}</b>分</span><span>手術 <b>${t.ope??'—'}</b>分</span>
       <span>覚醒 <b>${t.wake??'—'}</b>分</span><span>麻酔 <b>${t.anes??'—'}</b>分</span></div>`:''}
@@ -1432,12 +1458,8 @@ function viewRec(M){
       ${[['vital','バイタル'],['machine','麻酔器'],['dose','投薬'],['event','イベント']]
         .map(([k,l])=>`<button class="${recTab===k?'on':''}" onclick="recTab='${k}';render()">${l}</button>`).join('')}
     </div>
-    ${recTab==='vital'?`<div class="vfields">${[...VITALS,...EXTRA].map(v=>`
-      <div class="vf" onclick="kpOpen('${v.k}')"><div class="k">${v.l}<span class="muted"> ${v.u}</span></div>
-      <div class="v ${cell(v.k)==='—'?'e':''}">${cell(v.k)}</div></div>`).join('')}</div>`:''}
-    ${recTab==='machine'?`${machCopyBar(c)}<div class="vfields">${MACHINE.map(v=>`
-      <div class="vf" onclick="kpOpen('${v.k}')"><div class="k">${v.l}<span class="muted"> ${v.u}</span></div>
-      <div class="v ${cell(v.k)==='—'?'e':''}">${cell(v.k)}</div></div>`).join('')}</div>`:''}
+    ${recTab==='vital'?vitalFields(c):''}
+    ${recTab==='machine'?machCopyBar(c)+`<div class="vfields">${MACHINE.map(v=>vfCell(c,v)).join('')}</div>`:''}
     ${recTab==='dose'?doseForm(c):''}
     ${recTab==='event'?`<div class="chips">${EVENTS.map(e=>`
       <button onclick="addEvent('${e.k}')">${e.l}</button>`).join('')}</div>
@@ -1474,6 +1496,94 @@ function viewRec(M){
   }
 }
 function shiftT(m){ recTime=m2hm((hm2m(recTime)||nowMin())+m); render(); }
+/* ---- 術前検査の確認 ----
+   4項目それぞれで「実施した／していない（理由）」を選びます。
+   書いたそばから保存するので、途中で閉じても消えません。 */
+function preHTML(c){
+  return PRECHK.map(x=>{
+    const o=preOne(c,x.k), ok=preItemOk(c,x.k);
+    return `<div class="prow" style="${ok?'border-color:#a9dcc2;background:#f7fdfa':''}">
+      <b>${esc(x.l)} ${ok?'<span style="color:var(--ok)">✓</span>':'<span class="need">未確認</span>'}</b>
+      <div class="chips">
+        <button class="${o.s==='done'?'on':''}" onclick="preSet('${x.k}','s','done')">実施した</button>
+        <button class="${o.s==='skip'?'on':''}" onclick="preSet('${x.k}','s','skip')">実施していない</button></div>
+      ${o.s==='skip'?`<div class="chips" style="margin-top:6px">${PRENG.map(r=>
+        `<button class="sm ${o.r===r?'on':''}" onclick="preSet('${x.k}','r','${esc(r)}')">${esc(r)}</button>`).join('')}</div>`:''}
+      <input style="margin-top:6px" placeholder="${o.s==='skip'?'補足（任意）':'所見（任意）'}"
+        value="${esc(o.n||'')}" oninput="preSet('${x.k}','n',this.value,1)">
+    </div>`;
+  }).join('');
+}
+function openPre(){
+  const c=cur, done=preOk(c);
+  openModal(`<h2>術前検査の確認</h2>
+    <p class="muted" style="font-size:12.5px;margin:0 0 10px">4項目すべてを確認すると「導入」が押せるようになります。
+      実施していない検査は、理由を選べばそのまま進められます。</p>
+    <div id="pre_body">${preHTML(c)}</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn sp" onclick="closeModal()">閉じる</button>
+      <button class="btn primary sp" ${done?'':'disabled'} onclick="preDone()">
+        ${done?'確認しました':`あと ${PRECHK.length-preCount(c)}項目`}</button></div>`);
+}
+/* keep=1 のときは文字入力中なので、画面は組み直さずに中身だけ保存します */
+function preSet(k,f,v,keep){
+  const o=cur.pre[k]=cur.pre[k]||{};
+  if(f==='s'&&o.s===v&&v==='done'){ /* 押し直しても消さない */ }
+  o[f]=v;
+  if(f==='s'&&v==='done') o.r='';
+  save();
+  if(!keep) openPre();
+}
+function preDone(){
+  if(!preOk(cur)){ toast('まだ確認できていない項目があります'); return; }
+  cur.pre.by=myName()||cur.meta.anesthetist||''; cur.pre.at=nowHM();
+  save(); closeModal(); render(); toast('術前検査を確認しました');
+}
+function preBox(c){
+  if(preOk(c)) return `<div class="row muted" style="font-size:11.5px;margin-top:7px">
+    <span style="color:var(--ok);font-weight:800">✓ 術前検査 確認済み</span>
+    <span>${esc(c.pre.by||'')} ${esc(c.pre.at||'')}</span>
+    <button class="btn sm" onclick="openPre()">見直す</button></div>`;
+  return `<div class="prewarn">
+    <b>術前検査がまだ確認できていません（${preCount(c)}/${PRECHK.length}）</b>
+    <p class="muted" style="font-size:12.5px;margin:4px 0 8px">身体検査・血液検査・X線検査・エコー検査を確認すると「導入」が押せます。</p>
+    <button class="btn primary" onclick="openPre()">術前検査を確認する</button></div>`;
+}
+/* 1つぶんの入力欄。数値はキーパッド、換気モードのように選ぶものは一覧を出します */
+function vfCell(c,v){
+  const x=(c.chart.v[recTime]||{})[v.k], e=(x==null||x==='');
+  return `<div class="vf" onclick="${v.opt?`optOpen('${v.k}')`:`kpOpen('${v.k}')`}">
+    <div class="k">${esc(v.l)}${v.u?`<span class="muted"> ${esc(v.u)}</span>`:''}</div>
+    <div class="v ${e?'e':''}"${v.opt?' style="font-size:15px"':''}>${e?'—':esc(String(x))}</div></div>`;
+}
+/* 5分ごとに記録する9項目を上に、そのほかを下にまとめます。
+   上の「n/9」で、その時刻に何項目そろっているかが一目で分かります */
+function vitalFields(c){
+  const o=c.chart.v[recTime]||{};
+  const core=VITALS.filter(v=>v.core), rest=VITALS.filter(v=>!v.core).concat(EXTRA);
+  const got=core.filter(v=>o[v.k]!=null&&o[v.k]!=='').length;
+  return `<div class="vsec">5分ごとに記録 <b class="${got===core.length?'ok':''}">${got}/${core.length}</b></div>
+    <div class="vfields">${core.map(v=>vfCell(c,v)).join('')}</div>
+    <div class="vsec">そのほか</div>
+    <div class="vfields">${rest.map(v=>vfCell(c,v)).join('')}</div>`;
+}
+/* 選ぶだけの項目（換気モードなど） */
+function optOpen(k){
+  const f=allFields().find(x=>x.k===k); if(!f||!f.opt) return;
+  const now=(cur.chart.v[recTime]||{})[k]||'';
+  openModal(`<h2>${esc(f.l)} — ${esc(recTime)}</h2>
+   <div class="chips">${f.opt.map(x=>
+     `<button class="${now===x?'on':''}" onclick="optSet('${esc(k)}','${esc(x)}')">${esc(x)}</button>`).join('')}</div>
+   <div class="row" style="margin-top:14px">
+     <button class="btn sp" onclick="optSet('${esc(k)}','')">空にする</button>
+     <button class="btn sp" onclick="closeModal()">閉じる</button></div>`);
+}
+function optSet(k,v){
+  const o=cur.chart.v[recTime]=cur.chart.v[recTime]||{};
+  if(v==='') delete o[k]; else o[k]=v;
+  if(!Object.keys(o).length) delete cur.chart.v[recTime];
+  save(); closeModal(); render();
+}
 /* --- 麻酔器の設定は変わらないことが多いので、前回分をまとめて写せるようにします ---
    （バイタルは「測っていない値」を作らないよう、まとめてのコピーはしません） */
 function machPrevTime(){
@@ -1504,6 +1614,8 @@ function machCopy(){
 function stamp(k){
   const c=cur, lab=(EVENTS.find(e=>e.stamp===k)||{}).l||k;
   if(c.chart[k]){ stampEdit(k,lab); return; }
+  /* 術前検査の確認が済むまで麻酔は始められません */
+  if(k==='anesStart'&&!preOk(c)){ openPre(); toast('先に術前検査の確認をお願いします'); return; }
   const t=nowHM();
   c.chart[k]=t;
   if(k==='anesStart'&&!c.chart.start) c.chart.start=t;
@@ -1614,11 +1726,16 @@ function drugGroups(c){
     const q=g.get(k);
     if(!q.r&&o.route) q.r=o.route;
     if(!q.dil&&o.dil) q.dil=o.dil;
-    if(o.dose!=null){
-      const txt=dnum(o.dose)+' '+o.dunit;
+    /* シートの「投与量」と「投与量候補」列の値を、そのまま選択肢に並べます */
+    const put=(v,u)=>{
+      if(v==null||!isFinite(v)) return;
+      const uu=u||o.dunit||q.du, txt=dnum(v)+' '+uu;
       if(!q.doses.some(d=>d.txt===txt))
-        q.doses.push({txt,v:o.dose,u:o.dunit,cat:o.dcat||catMap(o.cat),r:o.route||q.r});
-    }
+        q.doses.push({txt,v,u:uu,cat:o.dcat||catMap(o.cat),r:o.route||q.r});
+    };
+    put(o.dose,o.dunit);
+    /* 並べ替えはしません。先頭（シートの「投与量」）が初めから選ばれているためです */
+    (o.cands||[]).forEach(cd=>put(cd.v,cd.u));
   };
   ALLDRUGS.forEach(add);
   /* 一覧にない薬を準備リストに足していたときは、そのまま選べるようにします */
@@ -2041,14 +2158,15 @@ function setZoom(z){ chartZoom=z; store.set('chartZoom',z); render(); }
    これで HR と SpO2 と体温が同じ線の上で重なることがなくなります。
    麻酔器・輸液・CRI は、値が変わったところだけを段で示します（上段の表）。 */
 const VCOL={hr:'#c0392b',sys:'#1f4e9c',map:'#2e86c1',dia:'#6a9fd4',
-  rr:'#15794a',spo2:'#7b3fa0',etco2:'#a05a00',temp:'#0d6e8c'};
+  rr:'#15794a',spo2:'#7b3fa0',etco2:'#a05a00',temp:'#0d6e8c',etiso:'#8a7400',pi:'#7b3fa0'};
 const PANELS=[
  {k:'circ',l:'循環',u:'mmHg・bpm',min:0,max:220,step:40,h:168,
   ser:[{k:'sys',l:'収縮期血圧',m:'d'},{k:'map',l:'平均血圧',m:'t'},
        {k:'dia',l:'拡張期血圧',m:'s'},{k:'hr',l:'心拍数',m:'x'}]},
  {k:'resp',l:'呼吸',u:'mmHg・/min',min:0,max:60,step:10,h:112,
   ser:[{k:'etco2',l:'EtCO2',m:'s'},{k:'rr',l:'呼吸数',m:'x'}],
-  r:{min:80,max:100,step:5,u:'%',ser:[{k:'spo2',l:'SpO2→右',m:'c'}]}},
+  r:{min:80,max:100,step:5,u:'%',c:'spo2',ser:[{k:'spo2',l:'SpO2→右',m:'c'}]},
+  r2:{min:0,max:5,step:1,u:'%Iso',c:'etiso',ser:[{k:'etiso',l:'EtIso→右',m:'d'}]}},
  {k:'temp',l:'体温',u:'℃',min:35,max:41,step:1,h:104,
   ser:[{k:'temp',l:'体温',m:'c'}]},
  {k:'pi',l:'PI',u:'%',min:0,max:10,step:2,h:80,
@@ -2114,7 +2232,17 @@ function vchart(c){
   if(t1-t0<30) t1=t0+30;
 
   const NA=CHART_EXP?false:window.innerWidth<=560;
-  const LEFT=NA?92:116, hasR=plotOn('spo2'), RIGHT=hasR?36:14;
+  /* 記録のある項目だけを描きます（使っていない帯で紙が埋まらないように）。
+     右軸の本数で右の余白が決まるので、幅を決める前に組み立てます */
+  const hasK=k=>Object.keys(V).some(t=>V[t][k]!=null&&V[t][k]!=='');
+  const fser=x=>x?{...x,ser:x.ser.filter(y=>plotOn(y.k)&&hasK(y.k))}:null;
+  let panels=PANELS.map(p=>({...p,ser:p.ser.filter(x=>plotOn(x.k)&&hasK(x.k)),
+      r:fser(p.r),r2:fser(p.r2)}))
+    .filter(p=>p.ser.length||(p.r&&p.r.ser.length)||(p.r2&&p.r2.ser.length));
+  if(!panels.length) panels=[{...PANELS[0],ser:PANELS[0].ser.filter(x=>plotOn(x.k)),r:null,r2:null}];
+  const rAxes=p=>[p.r,p.r2].filter(x=>x&&x.ser.length);
+  const nR=panels.reduce((a,p)=>Math.max(a,rAxes(p).length),0);
+  const LEFT=NA?92:116, RIGHT=nR?12+nR*25:14;
   /* 「全体」のときは、いま出せる幅にちょうど収めます
      （画像に書き出すときは画面の幅ではなく CHART_EXP の幅で描きます） */
   const wrap=document.querySelector('.chartwrap');
@@ -2143,13 +2271,6 @@ function vchart(c){
 
   const HEAD=bands.length?20:0;
   const BAND=bands.length?bands.length*BH+HEAD+8:0;
-  /* 記録のある項目だけを描きます（使っていない帯で紙が埋まらないように） */
-  const hasK=k=>Object.keys(V).some(t=>V[t][k]!=null&&V[t][k]!=='');
-  let panels=PANELS.map(p=>({...p,
-    ser:p.ser.filter(x=>plotOn(x.k)&&hasK(x.k)),
-    r:p.r?{...p.r,ser:p.r.ser.filter(x=>plotOn(x.k)&&hasK(x.k))}:null}))
-    .filter(p=>p.ser.length||(p.r&&p.r.ser.length));
-  if(!panels.length) panels=[{...PANELS[0],ser:PANELS[0].ser.filter(x=>plotOn(x.k)),r:null}];
   const PT=BAND+6, PH=panels.reduce((a,p)=>a+p.h+8,0);
   const AXY=PT+PH+2, AXH=a0!=null?34:22;
   const DSY=AXY+AXH, DSH=dsRows*(FS+4);
@@ -2197,11 +2318,14 @@ function vchart(c){
     for(let v=p.min;v<=p.max;v+=p.step){ const y=Y(v,p);
       g+=`<line x1="${LEFT}" y1="${y}" x2="${LEFT+PW}" y2="${y}" stroke="#e7edf3"/>`;
       g+=`<text x="${LEFT-4}" y="${y+3.2}" font-size="${FS-1}" fill="#7d8b99" text-anchor="end">${v}</text>`; }
-    if(p.r){
-      for(let v=p.r.min;v<=p.r.max;v+=p.r.step){ const y=bot-((v-p.r.min)/(p.r.max-p.r.min))*p.h;
-        g+=`<text x="${LEFT+PW+4}" y="${y+3.2}" font-size="${FS-1.5}" fill="${VCOL.spo2}">${v}</text>`; }
-      g+=`<text x="${LEFT+PW+4}" y="${top-3}" font-size="${FS-2}" font-weight="800" fill="${VCOL.spo2}">${esc(p.r.u)}</text>`;
-    }
+    /* 右の目盛り。SpO2 と EtIso のように、値の幅がまったく違うものは別々の軸で描きます */
+    const rax=rAxes(p);
+    rax.forEach((sc,ri)=>{
+      const rc=VCOL[sc.c]||'#333', xo=LEFT+PW+4+ri*25;
+      for(let v=sc.min;v<=sc.max;v+=sc.step){ const y=bot-((v-sc.min)/(sc.max-sc.min))*p.h;
+        g+=`<text x="${xo}" y="${y+3.2}" font-size="${FS-1.5}" fill="${rc}">${v}</text>`; }
+      g+=`<text x="${xo}" y="${top-3}" font-size="${FS-2}" font-weight="800" fill="${rc}">${esc(sc.u)}</text>`;
+    });
     /* 時間の縦線 */
     gridX.forEach(m=>{ g+=`<line x1="${X(m)}" y1="${top}" x2="${X(m)}" y2="${bot}" stroke="${isTick(m)?'#dbe3ec':'#f1f5f8'}"/>`; });
     /* 手術中の帯 */
@@ -2218,9 +2342,9 @@ function vchart(c){
       if(pts.length>1) g+=`<polyline points="${pts.map(q=>`${X(q.m)},${bot-((cl(q.v)-sc.min)/(sc.max-sc.min))*p.h}`).join(' ')}" fill="none" stroke="${col}" stroke-width="1.5" opacity=".85"/>`;
       pts.forEach(q=>{ g+=mk(sv.m,X(q.m),bot-((cl(q.v)-sc.min)/(sc.max-sc.min))*p.h,col); });
     });
-    draw(p.ser,p); if(p.r) draw(p.r.ser,p.r);
+    draw(p.ser,p); rax.forEach(sc=>draw(sc.ser,sc));
     /* 左の凡例 */
-    const leg=[...p.ser,...(p.r?p.r.ser:[])];
+    const leg=p.ser.concat(...rax.map(sc=>sc.ser));
     const lh=Math.min(11,(p.h-16)/Math.max(1,leg.length));
     g+=`<text x="4" y="${top+11}" font-size="${FS}" font-weight="800" fill="#3d4a57">${esc(p.l)}</text>`;
     g+=`<text x="4" y="${top+22}" font-size="${FS-2}" fill="#8b98a5">${esc(p.u)}</text>`;
@@ -2356,7 +2480,7 @@ function editVital(t){
   openModal(`<h2>${esc(t)} の記録</h2>
    <p class="muted" style="font-size:12.5px;margin:0 0 8px">値をタップすると入れ直せます。</p>
    ${list.length?list.map(v=>`<div class="drow" style="cursor:pointer"
-       onclick="closeModal();recTime='${esc(t)}';recTab='${MACHINE.some(m=>m.k===v.k)?'machine':'vital'}';render();kpOpen('${v.k}')">
+       onclick="closeModal();recTime='${esc(t)}';recTab='${MACHINE.some(m=>m.k===v.k)?'machine':'vital'}';render();${v.opt?'optOpen':'kpOpen'}('${v.k}')">
        <div class="nm"><b>${esc(v.l)}</b><small>${esc(v.u)}</small></div>
        <div class="vol">${esc(String(o[v.k]))}</div></div>`).join('')
      :'<div class="empty">値がありません</div>'}
@@ -2419,6 +2543,7 @@ const KPPRE={po_temp:['37.5','38.0','38.5','39.0'],po_hr:['80','100','120','140'
   po_pain:['0','1','2','3','4'],
   hr:['60','80','100','120'],sys:['90','110','130'],dia:['50','60','70'],map:['60','70','80'],
   rr:['8','12','16','20'],spo2:['98','99','100'],etco2:['35','40','45'],temp:['37.0','37.5','38.0'],
+  etiso:['1.0','1.2','1.5','2.0'],pi:['1.0','2.0','4.0'],
   iso:['1','1.5','2','2.5'],o2:['0.5','1','1.5','2'],air:['0.5','1','1.5','2'],fio2:['40','60','80','100'],
   vt:['50','100','150','200'],pip:['8','10','12','15'],peep:['0','2','3','5'],rrset:['8','10','12','15'],
   fluid:['2','3','5','10'],pain:['0','1','2','3','4']};
@@ -2483,7 +2608,7 @@ function kpOK(){
     if(i>=0&&i+1<POV.length){ render(); poKp(POV[i+1].k); } else render();
     return;
   }
-  const list=(recTab==='machine'?MACHINE:VITALS), i=list.findIndex(x=>x.k===kpKey);
+  const list=(recTab==='machine'?MACHINE:VITALS).filter(x=>!x.opt), i=list.findIndex(x=>x.k===kpKey);
   kpClose();
   if(i>=0&&i+1<list.length){ render(); kpOpen(list[i+1].k); } else render();
 }
@@ -2711,6 +2836,11 @@ function reportText(c){
   L.push('麻酔レポート','');
   L.push(`手術日　${jpDate(m.date)}　／　麻酔担当医　${m.anesthetist||'—'}`);
   L.push(`麻酔時間　${t.anes??'—'}分　　手術時間　${t.ope??'—'}分　　気管チューブ　${(c.rep.tube||'').trim()?'I.D. '+c.rep.tube+'mm':'—'}`);
+  const pl=PRECHK.map(x=>{ const o=preOne(c,x.k);
+    if(!o.s) return null;
+    return `・${x.l}：${o.s==='done'?'実施':'未実施（'+(o.r||'理由なし')+'）'}${o.n?' — '+o.n:''}`;
+  }).filter(Boolean);
+  if(pl.length){ L.push('','■ 術前検査'); pl.forEach(x=>L.push(x)); }
   L.push('','■ 麻酔プロトコル');
   const rows=[['前投与',catLine(c,'前投与')],['導入',catLine(c,'導入')],
               ['維持',repVal(c,'maint')],['鎮痛',catLine(c,'鎮痛')],['循環',catLine(c,'循環')]];
