@@ -304,7 +304,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v3.2 (2026-09-24)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.3 (2026-09-25)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -1726,16 +1726,18 @@ function drugGroups(c){
     const q=g.get(k);
     if(!q.r&&o.route) q.r=o.route;
     if(!q.dil&&o.dil) q.dil=o.dil;
-    /* シートの「投与量」と「投与量候補」列の値を、そのまま選択肢に並べます */
+    /* シートの「投与量」と「投与量候補」列の値を選択肢にします */
     const put=(v,u)=>{
-      if(v==null||!isFinite(v)) return;
+      if(v==null||!isFinite(v)) return null;
       const uu=u||o.dunit||q.du, txt=dnum(v)+' '+uu;
       if(!q.doses.some(d=>d.txt===txt))
         q.doses.push({txt,v,u:uu,cat:o.dcat||catMap(o.cat),r:o.route||q.r});
+      return txt;
     };
-    put(o.dose,o.dunit);
-    /* 並べ替えはしません。先頭（シートの「投与量」）が初めから選ばれているためです */
-    (o.cands||[]).forEach(cd=>put(cd.v,cd.u));
+    const dtx=put(o.dose,o.dunit);
+    const ctx=(o.cands||[]).map(cd=>put(cd.v,cd.u)).filter(Boolean);
+    /* 初めから選んでおく値。シートの「投与量」、空欄のときは候補の1つめ */
+    if(q.def==null) q.def=dtx||ctx[0]||null;
   };
   ALLDRUGS.forEach(add);
   /* 一覧にない薬を準備リストに足していたときは、そのまま選べるようにします */
@@ -1748,6 +1750,14 @@ function drugGroups(c){
       cri:String(p.route||'')==='CRI',per:'',dil:p.dil||'',warn:'',
       r:String(p.route||'').split('/')[0],
       doses:pd?[{txt:p.dose,v:pd.v,u:pd.u,cat:'',r:p.route}]:[]});
+  });
+  /* 投与量の候補は小さい順に並べます（シートに 10 → 1,2,3… と書かれていても
+     選ぶときに迷わないように）。単位が混ざっている薬だけは、並べ替えずそのままにします。
+     並べ替えても、初めから選ばれている投与量は変わりません（q.def で覚えています） */
+  g.forEach(q=>{
+    if(new Set(q.doses.map(d=>d.u)).size<=1) q.doses.sort((a,b)=>a.v-b.v);
+    const i=q.doses.findIndex(d=>d.txt===q.def);
+    q.di=i<0?0:i;
   });
   /* 準備した薬を先頭に。あとはシートの並び（分類ごと）のまま */
   const prepped=new Set(c.prep.items.map(p=>p.name));
@@ -1820,7 +1830,8 @@ function doseRestore(){
   const s=document.getElementById('d_dose');
   s.innerHTML=o.doses.map((d,i)=>`<option value="${i}">${esc(d.txt)}</option>`).join('')
     +'<option value="x">その他（数値を入力）</option>';
-  s.value=(doseIdx==='x'||(doseIdx!==''&&+doseIdx<o.doses.length))?doseIdx:(o.doses.length?'0':'x');
+  s.value=(doseIdx==='x'||(doseIdx!==''&&+doseIdx<o.doses.length))?doseIdx
+          :(o.doses.length?String(o.di||0):'x');
   doseIdx=s.value;
   const u=document.getElementById('d_unit');
   if(u){ u.innerHTML=unitChoices(o).map(x=>`<option>${x}</option>`).join('');
@@ -1858,7 +1869,8 @@ function onDrugPick(){
   const s=document.getElementById('d_dose');
   s.innerHTML=o.doses.map((d,i)=>`<option value="${i}">${esc(d.txt)}</option>`).join('')
     +'<option value="x">その他（数値を入力）</option>';
-  if(!o.doses.length) s.value='x';
+  s.value=o.doses.length?String(o.di||0):'x';
+  doseIdx=s.value;
   const u=document.getElementById('d_unit');
   if(u) u.innerHTML=unitChoices(o).map(x=>`<option>${x}</option>`).join('');
   setRoute(o.r||(o.cri?'CRI':''));
