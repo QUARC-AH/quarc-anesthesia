@@ -304,7 +304,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v3.3 (2026-09-25)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.4 (2026-09-25)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -3682,10 +3682,32 @@ function updBar(){
     <button onclick="applyUpdate()">いま新しくする</button>
     <button class="later" onclick="UPDHIDE=true;updBar()">あとで</button>`;
 }
+/* この端末がほんとうに保存できているか。
+   プライベートブラウズなどで保存できていないときに開き直すと、記録が消えてしまいます */
+function storeOk(){
+  try{ localStorage.setItem('__chk','1'); localStorage.removeItem('__chk'); return true; }
+  catch(e){ return false; }
+}
+const liveCases=()=>db.cases.filter(c=>c&&c.chart&&c.chart.anesStart&&!c.chart.anesStop);
 /* 端末に残っている古い控えを消してから開き直します。記録は消えません */
 async function applyUpdate(){
-  if(FB.pend&&!confirm('まだ送れていない記録があります。先に回線を確かめてください。\nこのまま新しくしますか？')) return;
   save();
+  /* 保存できない端末では開き直さない（開き直した時点で記録が消えるため） */
+  if(!storeOk()){
+    alert('この端末は記録を保存できない設定になっています（プライベートブラウズなど）。\n'
+      +'いま開き直すと、この端末の記録が消えます。\n'
+      +'麻酔が終わってから、ふつうのウインドウで開き直してください。');
+    return;
+  }
+  const live=liveCases();
+  if(live.length&&!confirm(
+      '麻酔中の症例があります（'+live.map(c=>c.meta.patientName||'無題').join('・')+'）。\n\n'
+      +'記録した内容は消えません。\n'
+      +'ただし、入力の途中のもの（キーパッドに打ち込んだ数字、まだ「投薬を記録」を押していない薬）は消えます。\n\n'
+      +'いま新しくしますか？')) return;
+  if(FB.pend&&!confirm('まだ送れていない記録があります。先に回線を確かめてください。\nこのまま新しくしますか？')) return;
+  /* 開き直したあと、同じ症例の記録画面に戻します */
+  try{ store.set('resume',JSON.stringify({id:cur?cur.id:'',view,t:Date.now()})); }catch(e){}
   try{ if(window.caches){ const ks=await caches.keys(); await Promise.all(ks.map(k=>caches.delete(k))); } }catch(e){}
   /* Safari が持っている古い控えも置き換えてから開き直します
      （これをしないと、消したそばから同じ古い版が返ってくることがあります） */
@@ -3869,6 +3891,15 @@ function firstRunSave(){
   toast(`${n} さん、準備できました`);
 }
 
+/* 「いま新しくする」で開き直したときは、さっきまで開いていた症例に戻ります
+   （麻酔中に版を上げても、一覧から探し直さずに済むように） */
+(function resume(){
+  let r=null; try{ r=JSON.parse(store.get('resume')||'null'); }catch(e){}
+  store.del('resume');
+  if(!r||!r.id||Date.now()-(r.t||0)>3*60*1000) return;
+  const c=db.cases.find(x=>x.id===r.id);
+  if(c) go(['rec','report','prep','postop'].indexOf(r.view)>=0?r.view:'rec',c,false);
+})();
 render(); syncBar();
 /* 院内設定に firebaseConfig が入っていれば、初回起動から自動でつなぎます */
 if(cfg('fbCfg')&&(store.get('fbOn')==='1'||SITE_CONFIG.fbCfg)) fbConnect(true);
