@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
+<!-- ★ バージョン: v2026.10.03-1（画面表示は APP_VER = v3.5）
+     2026-10-03 報告書用グラフ画像を、記録画面で見ている幅で描くように変更。
+                報告書ページのグラフも同じ幅に（1000px固定→画面幅）。 -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -304,7 +307,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v3.4 (2026-09-25)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.5 (2026-10-03)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -2877,19 +2880,28 @@ function repField(l,k,c,presetList){
       <button type="button" class="sm" onclick="repSet('${k}','');render()">自動に戻す</button></div></label>`;
 }
 function repPick(k,i){ cur.rep[k]=presets(cur)[k][i].t; save(); render(); }
-/* レポートに載せるグラフ。画面の幅に関係なく同じ形で描き、
-   表示と紙の両方で、枠にあわせて縮めます（線の絵なので縮めても読めます） */
+/* レポートに載せるグラフ。記録画面で見ているのと同じ幅で描きます。
+   以前は 1000px 固定で描いて枠に縮めていたため、記録画面より一回り小さく見えていました */
 function repChart(c){
   const z=chartZoom, e=CHART_EXP;
-  chartZoom='fit'; CHART_EXP=1000;
+  chartZoom='fit'; CHART_EXP=chartExpW();
   try{ return vchart(c); } finally { chartZoom=z; CHART_EXP=e; }
 }
 
 /* ---- グラフを画像にする ----
    画面の見た目ではなく、決まった幅で描き直してから PNG にします。
    外から読み込むものが無い絵なので、端末の中だけで変換できます。 */
+/* 画像にするときの幅。いま画面で見ているグラフの幅に合わせます。
+   1100px の固定幅だと横に間延びして、ドキュメントに貼ると文字が小さくなっていました。
+   iPhone のように狭い画面では文字が潰れないよう下限を、Mac のように広い画面では
+   間延びしないよう上限を置きます（画面写真と同じ見え方になる幅です） */
+function chartExpW(){
+  const wrap=document.querySelector('.chartwrap');
+  const w=(wrap&&wrap.clientWidth)||0;
+  return Math.max(720,Math.min(860,w||840));
+}
 function chartPNG(c,W){
-  W=W||1100;
+  W=W||chartExpW();
   const z=chartZoom, e=CHART_EXP;
   let svg; chartZoom='fit'; CHART_EXP=W;
   try{ svg=vchart(c); } finally { chartZoom=z; CHART_EXP=e; }
