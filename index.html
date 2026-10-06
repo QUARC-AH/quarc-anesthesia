@@ -1,9 +1,16 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<!-- ★ バージョン: v2026.10.03-1（画面表示は APP_VER = v3.5）
-     2026-10-03 報告書用グラフ画像を、記録画面で見ている幅で描くように変更。
-                報告書ページのグラフも同じ幅に（1000px固定→画面幅）。 -->
+<!-- ★ バージョン: v2026.10.06-1（画面表示は APP_VER = v3.6）
+     2026-10-06 記録が消えない・どの端末でも見える・自分で戻せる、のための改修。
+       ・保存先を IndexedDB に（localStorage 満杯で黙って消える問題）。控えを10分おきに残す
+       ・同期：回線が戻ったら自動でつなぎ直す／症例ごとに送る／画面が隠れる前に送る／
+         開いていない症例の変更も見回って送る／前回の同期の土台を端末に残す
+       ・常時読み込みを 14日 → 45日に。過去の症例はクラウドから読み込める
+       ・削除は「印」にして他の端末にも伝え、復旧画面から戻せる
+       ・⚙ → 保存と復旧（保存状態・同期状態・控え・削除した症例・ファイル）
+       ・イベントに「造影剤投与」を追加（CT・MRI の麻酔用）
+     2026-10-03 v2026.10.03-1 報告書用グラフ画像を画面の幅で描く -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -307,7 +314,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v3.5 (2026-10-03)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.6 (2026-10-06)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -383,12 +390,98 @@ function cfg(k){
 const cfgIsShared=k=>{const v=store.get(k); return (v===null||v===undefined)&&!!cfg(k);};
 const KEY='quarc_anes_v2';
 let db=(()=>{try{return JSON.parse(store.get(KEY)||'{"cases":[]}')}catch(e){return{cases:[]}}})();
+
+/* ---- 端末の中の保存先 ----
+   v3.6 から主な保存先は IndexedDB です（localStorage は 5MB ほどで満杯になると、
+   黙って保存できなくなり、開き直した瞬間に記録が消えていました）。
+   localStorage にも書き続けますが、満杯で書けなくても IndexedDB にあれば消えません。
+   さらに「控え」を時刻付きで IndexedDB に残し、何かあっても自分で戻せるようにします。 */
+const IDB={db:null,ok:null};
+const SAVE={ls:true,idb:true,at:0,size:0,snapAt:0};
+function idbOpen(){
+  if(IDB.db) return Promise.resolve(true);
+  return new Promise(res=>{ try{
+    if(typeof indexedDB==='undefined'){ IDB.ok=false; return res(false); }
+    const r=indexedDB.open('quarc_anes',1);
+    r.onupgradeneeded=()=>{ const d=r.result;
+      if(!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if(!d.objectStoreNames.contains('snap')) d.createObjectStore('snap',{keyPath:'t'}); };
+    r.onsuccess=()=>{ IDB.db=r.result; IDB.ok=true; IDB.db.onversionchange=()=>{try{IDB.db.close()}catch(e){} IDB.db=null;}; res(true); };
+    r.onerror=()=>{ IDB.ok=false; res(false); };
+    r.onblocked=()=>{ IDB.ok=false; res(false); };
+  }catch(e){ IDB.ok=false; res(false); } });
+}
+function idbTx(name,mode,fn){
+  return idbOpen().then(ok=>{ if(!ok) throw new Error('IndexedDB が使えません');
+    return new Promise((res,rej)=>{ let out;
+      try{ const tx=IDB.db.transaction(name,mode); const st=tx.objectStore(name);
+        out=fn(st); tx.oncomplete=()=>res(out&&out.result!==undefined?out.result:out); tx.onerror=()=>rej(tx.error||new Error('IndexedDB エラー')); tx.onabort=()=>rej(tx.error||new Error('IndexedDB 中断')); }
+      catch(e){ rej(e); } }); });
+}
+const idbPut=(st,key,val)=>idbTx(st,'readwrite',o=>key===undefined?o.put(val):o.put(val,key));
+const idbGet=(st,key)=>idbTx(st,'readonly',o=>o.get(key));
+const idbDel=(st,key)=>idbTx(st,'readwrite',o=>o.delete(key));
+const idbAll=st=>idbTx(st,'readonly',o=>o.getAll());
+const idbKeys=st=>idbTx(st,'readonly',o=>o.getAllKeys());
+
+/* 控えの残し方：直近は10分おき、古いものは1日1つ。30日より前は消します。
+   （1日の麻酔を細かく戻せて、容量は増えすぎない） */
+const SNAP_GAP=10*60*1000, SNAP_KEEP=30*86400000;
+function snapPrune(keys){
+  const now=Date.now(), keep=new Set(); let lastDay='';
+  keys.slice().sort((a,b)=>a-b).forEach(t=>{
+    if(now-t>SNAP_KEEP) return;
+    const day=new Date(t).toDateString();
+    if(now-t<86400000){ keep.add(t); return; }      /* 24時間以内は全部 */
+    if(day!==lastDay){ keep.add(t); lastDay=day; }  /* それより前は1日1つ（その日の最初） */
+  });
+  return keys.filter(t=>!keep.has(t));
+}
+let saveChain=Promise.resolve();
+function saveIdb(json,now){
+  /* 順番を守って書きます（後から始めた保存が先に終わって古い内容が残らないように） */
+  saveChain=saveChain.then(async()=>{
+    try{ await idbPut('kv','db',{t:now,v:json}); SAVE.idb=true; }
+    catch(e){ SAVE.idb=false; }
+    try{
+      if(now-SAVE.snapAt>=SNAP_GAP){
+        await idbPut('snap',undefined,{t:now,n:db.cases.length,v:json}); SAVE.snapAt=now;
+        const ks=await idbKeys('snap'); for(const k of snapPrune(ks)) await idbDel('snap',k);
+      }
+    }catch(e){}
+    if(typeof syncBar==='function') syncBar();
+  }).catch(()=>{});
+  return saveChain;
+}
 const save=()=>{
   /* 鍵のない行は同期のときに落ちてしまうので、保存の直前に必ず付けます。
      （投薬・イベント・準備薬・術後チェック・通知） */
   if(typeof keyRows==='function') db.cases.forEach(keyRows);
-  store.set(KEY,JSON.stringify(db)); store.set('lastUse',String(Date.now()));
+  const json=JSON.stringify(db), now=Date.now();
+  SAVE.size=json.length; SAVE.at=now;
+  try{ localStorage.setItem(KEY,json); localStorage.setItem('lastUse',String(now)); SAVE.ls=true; }
+  catch(e){ SAVE.ls=false; MEM[KEY]=json; MEM.lastUse=String(now); }
+  saveIdb(json,now);
   if(typeof fbPush==='function'&&cur)fbPush(cur);};
+/* 起動時：IndexedDB の方が新しければ（または localStorage が空なら）そちらを使います */
+async function bootRestore(){
+  try{
+    const rec=await idbGet('kv','db'); if(!rec||!rec.v) return false;
+    const lsAt=+(store.get('lastUse')||0), lsN=db.cases.length;
+    let j; try{ j=JSON.parse(rec.v); }catch(e){ return false; }
+    if(!j||!Array.isArray(j.cases)) return false;
+    const idbNewer=rec.t>lsAt+1000, lsEmpty=lsN===0&&j.cases.length>0;
+    if(!idbNewer&&!lsEmpty) return false;
+    /* IndexedDB の方が後に保存されたものなので、両方にある症例は IndexedDB の内容を使います。
+       片方にしかない症例はどちらも残します（消す方向には動かしません） */
+    const byId={}; db.cases.forEach((c,i)=>byId[c.id]=i);
+    j.cases.forEach(c=>{ if(!c||!c.id) return;
+      if(byId[c.id]==null) db.cases.push(c); else if(idbNewer) db.cases[byId[c.id]]=c; });
+    db.cases.forEach(fix);
+    const json=JSON.stringify(db); try{ localStorage.setItem(KEY,json); }catch(e){}
+    return true;
+  }catch(e){ return false; }
+}
 
 /* ================= 共通 ================= */
 const pad=n=>String(n).padStart(2,'0');
@@ -833,6 +926,7 @@ const EVENTS=[
  {k:'opestart',  l:'手術開始（切皮）', stamp:'opeStart'},
  {k:'opeend',    l:'手術終了',    stamp:'opeStop'},
  {k:'exam',      l:'検査'},
+ {k:'contrast',  l:'造影剤投与'},   /* CT・MRI の麻酔で使います */
  {k:'extubation',l:'抜管',        stamp:'anesStop'},
  {k:'awake',     l:'覚醒'},
  /* 術中に起きたこと。押した時点で記録され、あとから記録一覧でメモを足せます */
@@ -983,7 +1077,7 @@ function viewList(M){
   f.textContent='＋ 新規麻酔'; f.onclick=()=>{const c=fix(blank());db.cases.push(c);save();go('edit',c)};
   f.classList.remove('hide');
 
-  const all=db.cases.slice().sort((a,b)=>{
+  const all=db.cases.filter(alive).sort((a,b)=>{
     const o={live:0,ready:1,prep:2,plan:3,done:4};
     const d=o[statusOf(a).k]-o[statusOf(b).k]; if(d)return d;
     return String(b.meta.date).localeCompare(String(a.meta.date));
@@ -1096,10 +1190,20 @@ function askDelCase(){
     <div class="row"><button class="btn sp" onclick="closeModal()">キャンセル</button>
       <button class="btn danger sp" onclick="delCase()">削除する</button></div>`);
 }
+/* 削除は消さずに「削除済み」の印を付けます。
+   以前は端末の中から消すだけだったので、他の端末からすぐ戻ってきていました（同期の取り消し扱い）。
+   印なら他の端末にも伝わり、間違えて消したときは ⚙ → 保存と復旧 から戻せます */
+const alive=c=>!!c&&!(c.meta&&c.meta.deletedAt);
 function delCase(){
   const name=cur.meta.patientName||'症例';
-  db.cases=db.cases.filter(x=>x.id!==cur.id); save();
-  cur=null; view='list'; H.length=0; closeModal(); render(); toast(`${name} を削除しました`);
+  cur.meta.deletedAt=new Date().toISOString(); cur.meta.deletedBy=myName()||'—'; save();
+  cur=null; view='list'; H.length=0; closeModal(); render(); toast(`${name} を削除しました（保存と復旧 から戻せます）`);
+}
+function undelCase(id){
+  const c=db.cases.find(x=>x.id===id); if(!c) return;
+  delete c.meta.deletedAt; delete c.meta.deletedBy;
+  const keep=cur; cur=c; save(); cur=keep;
+  toast(`${c.meta.patientName||'症例'} を戻しました`);
 }
 
 /* ================= 患者情報の入力 ================= */
@@ -2135,7 +2239,7 @@ function askAbx(t,ev){
 }
 
 setInterval(()=>{
-  db.cases.forEach(c=>{
+  db.cases.filter(alive).forEach(c=>{
     /* 終了を押すまで、設定した間隔で繰り返し通知します */
     const cy=postopCycle(c);
     if(cy!=null&&cy>=1&&PO_FIRED[c.id]!==cy){
@@ -3416,8 +3520,7 @@ function openSettings(){
      </div>
    </div>
    <div class="row" style="margin-top:16px">
-     <button class="btn sp" onclick="exportAll()">書き出し</button>
-     <button class="btn sp" onclick="document.getElementById('imp').click()">読み込み</button>
+     <button class="btn primary sp" onclick="openRecovery()">💾 保存と復旧</button>
    </div>
    <input type="file" id="imp" accept=".json" style="display:none" onchange="importAll(this)">
    <div class="row" style="margin-top:12px"><button class="btn primary sp" onclick="closeModal()">閉じる</button></div>`);
@@ -3525,6 +3628,79 @@ function importAll(inp){ const f=inp.files[0]; if(!f)return; const r=new FileRea
     save(); closeModal(); render(); toast('読み込みました');}catch(e){alert('読み込めませんでした')}};
   r.readAsText(f); inp.value=''; }
 
+/* ================= 保存と復旧 =================
+   記録がどこにどう残っているかを見て、消えたときに自分で戻せる画面です。
+   戻す操作はすべて「足す」方向で、いまある記録を消すことはありません。 */
+const fmtDT=t=>{ const d=new Date(t); return `${d.getMonth()+1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fmtKB=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.round(n/1024)+' KB';
+async function openRecovery(){
+  let snaps=[]; try{ snaps=(await idbAll('snap'))||[]; }catch(e){}
+  snaps.sort((a,b)=>b.t-a.t);
+  const dels=db.cases.filter(c=>c&&c.meta&&c.meta.deletedAt).sort((a,b)=>String(b.meta.deletedAt).localeCompare(String(a.meta.deletedAt)));
+  const ok=v=>v?'<b style="color:var(--ok)">✓</b>':'<b style="color:var(--warn)">✗</b>';
+  const live=db.cases.filter(alive).length;
+  openModal(`<h2>保存と復旧</h2>
+   <h3 style="margin:6px 0 4px">この端末</h3>
+   <div class="muted" style="font-size:12.5px;line-height:1.8">
+     ${ok(SAVE.idb!==false&&IDB.ok!==false)} IndexedDB（主な保存先）　${ok(SAVE.ls)} localStorage（予備）<br>
+     症例 <b>${live}</b> 件${dels.length?`（ほかに削除済み ${dels.length} 件）`:''} ・ 大きさ ${fmtKB(SAVE.size||JSON.stringify(db).length)}
+     ・ 最終保存 ${SAVE.at?fmtDT(SAVE.at):'—'}
+     ${!SAVE.ls&&SAVE.at?'<br><span style="color:var(--warn);font-weight:800">localStorage がいっぱいか使えません。IndexedDB に保存できていれば記録は残ります。</span>':''}
+     ${!SAVE.ls&&!SAVE.idb&&SAVE.at?'<br><span style="color:var(--warn);font-weight:800">⚠ どこにも保存できていません。いますぐ「ファイルに書き出す」で控えを取ってください。</span>':''}
+   </div>
+   <h3 style="margin:14px 0 4px">同期（他の端末・クラウド）</h3>
+   <div class="muted" style="font-size:12.5px;line-height:1.8">
+     ${ok(FB.on)} ${FB.on?'つながっています':'つながっていません'}${FB.err?` — ${esc(errJa(FB.err))}`:''}<br>
+     最終同期 ${FB.at?fmtDT(FB.at):'—'} ・ 送信待ち ${pendCount()} 件 ・ 常時読み込み：直近 ${SYNC_DAYS} 日
+   </div>
+   <div class="row" style="margin-top:6px">
+     ${FB.on?`<button class="btn sm" onclick="fbFlush().then(()=>{toast('送りました');openRecovery()})">いま送る</button>`
+            :`<button class="btn sm primary" onclick="fbConnect(false).then(()=>openRecovery())">つなぎ直す</button>`}
+     <button class="btn sm" onclick="fbLoadOlder(90).then(()=>openRecovery())">過去90日を読み込む</button>
+     <button class="btn sm" onclick="if(confirm('クラウドにある症例をすべて読み込みます。件数が多いと時間がかかります。よろしいですか？'))fbLoadOlder(0).then(()=>openRecovery())">すべて読み込む</button>
+   </div>
+   <h3 style="margin:14px 0 4px">この端末の控え（自動）</h3>
+   <p class="muted" style="font-size:12px;margin:0 0 6px">直近24時間は10分おき、それより前は1日1つ、30日ぶん残ります。
+     「足りない分を戻す」は、いま無い症例だけを足します（安全）。</p>
+   <div style="max-height:30vh;overflow:auto">
+   ${snaps.length?snaps.map(x=>`<div class="drow" style="padding:6px 8px">
+       <div class="nm"><b>${fmtDT(x.t)}</b><small>症例 ${x.n} 件 ・ ${fmtKB((x.v||'').length)}</small></div>
+       <button class="btn sm" onclick="restoreSnap(${x.t},false)">足りない分を戻す</button>
+       <button class="btn sm" onclick="restoreSnap(${x.t},true)">この時点に戻す</button></div>`).join('')
+     :'<div class="empty">控えはまだありません（保存のたびに作られます）</div>'}
+   </div>
+   <h3 style="margin:14px 0 4px">削除した症例</h3>
+   <div style="max-height:22vh;overflow:auto">
+   ${dels.length?dels.map(c=>`<div class="drow" style="padding:6px 8px">
+       <div class="nm"><b>${esc(c.meta.patientName||'（無題）')}</b><small>${esc(c.meta.date||'')} ・ ${esc(c.meta.deletedBy||'')} が ${fmtDT(Date.parse(c.meta.deletedAt))} に削除</small></div>
+       <button class="btn sm" onclick="undelCase('${c.id}');openRecovery()">戻す</button></div>`).join('')
+     :'<div class="empty">削除した症例はありません</div>'}
+   </div>
+   <h3 style="margin:14px 0 4px">ファイル</h3>
+   <div class="row">
+     <button class="btn sm" onclick="exportAll()">ファイルに書き出す</button>
+     <button class="btn sm" onclick="document.getElementById('imp').click()">ファイルから読み込む</button>
+   </div>
+   <div class="row" style="margin-top:12px">
+     <button class="btn sp" onclick="closeModal();openSettings()">戻る</button>
+     <button class="btn primary sp" onclick="closeModal()">閉じる</button></div>`);
+}
+/* 控えから戻す。overwrite=false は無い症例を足すだけ。true は控えの時点の内容で置き換えます */
+async function restoreSnap(t,overwrite){
+  let rec; try{ rec=await idbGet('snap',t); }catch(e){}
+  if(!rec||!rec.v){ toast('控えが読めませんでした'); return; }
+  let j; try{ j=JSON.parse(rec.v); }catch(e){ toast('控えが壊れています'); return; }
+  const list=(j.cases||[]).filter(c=>c&&c.id);
+  if(overwrite&&!confirm(`${fmtDT(t)} の時点の内容で、${list.length} 件の症例を置き換えます。\nそれ以降に入れた記録は消え、戻した内容が他の端末にも送られます。\nよろしいですか？`)) return;
+  let added=0, replaced=0;
+  list.forEach(c=>{ const i=db.cases.findIndex(x=>x.id===c.id);
+    if(i<0){ db.cases.push(fix(c)); added++; }
+    else if(overwrite){ db.cases[i]=fix(c); replaced++; } });
+  save(); fbSweep(); render();
+  toast(overwrite?`${added} 件を足し、${replaced} 件を戻しました`:`${added} 件を戻しました`);
+  closeModal();
+}
+
 /* ================= 複数人での同時利用（Cloud Firestore） =================
    症例をフィールド単位で同期する。誰かが入力した値は他の端末にすぐ反映され、
    別の項目を同時に触っても互いの入力が消えない。 */
@@ -3569,11 +3745,13 @@ function fromSync(r){
 
 async function fbConnect(silent){
   const cfgs=cfg('fbCfg'); if(!cfgs) return;
+  if(FB.on||FB.connecting) return;
   let fcfg; try{fcfg=JSON.parse(cfgs.trim().charAt(0)==='{'?cfgs:'{'+cfgs+'}')}
   catch(e){ if(!silent)toast('Firebase設定が読めません'); return; }
   const em=cfg('fbEmail')||'';
   const fld=document.getElementById('s_pw');
   const pw=(fld&&fld.value)||store.get('fbPw')||SITE_CONFIG.fbPw||'';
+  FB.connecting=true;
   try{
     const [{initializeApp},fs,au]=await Promise.all([
       import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
@@ -3587,13 +3765,40 @@ async function fbConnect(silent){
     }
     let d; try{ d=fs.initializeFirestore(app,{localCache:fs.persistentLocalCache({tabManager:fs.persistentMultipleTabManager()})}); }
     catch(e){ d=fs.getFirestore(app); }
-    FB.fs=fs; FB.db=d; FB.on=true; store.set('fbOn','1');
-    fbSubscribe(); toast('共同利用に接続しました'); render(); syncBar();
-  }catch(e){ if(!silent)toast('接続できません: '+e.message); }
+    await fbAttach(fs,d);
+    toast('共同利用に接続しました');
+  }catch(e){ FB.err=String(e.message||e); syncBar(); if(!silent)toast('接続できません: '+e.message); }
+  finally{ FB.connecting=false; }
 }
+/* Firestore（または動作確認用の代わり）をつなぐ。前回どこまで同期したかを端末から読み戻します */
+async function fbAttach(fs,d){
+  FB.fs=fs; FB.db=d;
+  try{ const rec=await idbGet('kv','synced'); if(rec&&rec.v&&typeof rec.v==='object') FB.synced=rec.v; }catch(e){}
+  FB.on=true; FB.err=''; store.set('fbOn','1');
+  fbSubscribe(); render(); syncBar();
+  fbSweep();
+}
+/* 回線が戻ったとき・しばらくつながっていないときに、つなぎ直します。
+   以前は起動時に圏外だと、その回は最後まで同期されませんでした */
+if(typeof window!=='undefined'){
+  window.addEventListener('online',()=>setTimeout(()=>{ if(!FB.on&&cfg('fbCfg')) fbConnect(true); fbSweep(); },1500));
+  setInterval(()=>{ if(!FB.on&&cfg('fbCfg')&&navigator.onLine!==false&&(store.get('fbOn')==='1'||SITE_CONFIG.fbCfg)) fbConnect(true); },60000);
+}
+/* 英語のエラーを、スタッフが読める言葉に */
+function errJa(e){ const m=String(e||'');
+  if(/Failed to fetch|dynamically imported|NetworkError|unavailable|offline/i.test(m)) return '回線がないか、通信が止められています';
+  if(/permission|insufficient/i.test(m)) return 'ログインが切れています（設定でパスワードを入れ直してください）';
+  if(/quota|exceeded/i.test(m)) return 'クラウドの上限に達しました';
+  if(/password|auth|credential/i.test(m)) return 'メールアドレスかパスワードが違います';
+  return m.slice(0,40); }
+/* 同期の土台（相手の最後の姿）を端末に残す。開き直したあとも差分が正しく取れるように */
+let syncedTimer=null;
+function syncedPersist(){ clearTimeout(syncedTimer);
+  syncedTimer=setTimeout(()=>{ idbPut('kv','synced',{t:Date.now(),v:FB.synced}).catch(()=>{}); },2000); }
 function fbSubscribe(){
   const fs=FB.fs; if(!fs||FB.un) return;
-  const q=fs.query(fs.collection(FB.db,'anesCases'),fs.where('meta.date','>=',dayAgo(14)));
+  /* 直近 45日ぶんを常時読みます。それより前は ⚙ → 保存と復旧 → 「過去の症例を読み込む」で取れます */
+  const q=fs.query(fs.collection(FB.db,'anesCases'),fs.where('meta.date','>=',dayAgo(SYNC_DAYS)));
   FB.un=fs.onSnapshot(q,snap=>{
     let touched=false, added=0;
     snap.docs.forEach(dd=>{
@@ -3614,12 +3819,13 @@ function fbSubscribe(){
         if(r._by&&r._by!==(myName()||'—')) FB.lastBy=r._by;
         if(cur&&cur.id===r.id) touched=true; }
     });
-    FB.at=Date.now();
+    FB.at=Date.now(); FB.err='';
+    syncedPersist();
     save();
     if(added) toast(`他の端末から ${added} 件を受信しました`);
     if(added||touched||view==='list') render();
     syncBar();
-  },err=>console.warn(err));
+  },err=>{ FB.err=String(err&&err.message||err); syncBar(); console.warn(err); });
   fbPresetsSub();
   fbPresence();
 }
@@ -3644,6 +3850,7 @@ function presetPush(p){
 function presetDel(id){
   if(FB.on&&FB.fs) FB.fs.deleteDoc(FB.fs.doc(FB.fs.collection(FB.db,'anesPresets'),id)).catch(()=>{});
 }
+const SYNC_DAYS=45;
 const dayAgo=n=>{const d=new Date(Date.now()-n*86400000);return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`};
 function fbPresence(){
   const fs=FB.fs; if(!fs)return;
@@ -3700,7 +3907,7 @@ function storeOk(){
   try{ localStorage.setItem('__chk','1'); localStorage.removeItem('__chk'); return true; }
   catch(e){ return false; }
 }
-const liveCases=()=>db.cases.filter(c=>c&&c.chart&&c.chart.anesStart&&!c.chart.anesStop);
+const liveCases=()=>db.cases.filter(c=>alive(c)&&c.chart&&c.chart.anesStart&&!c.chart.anesStop);
 /* 端末に残っている古い控えを消してから開き直します。記録は消えません */
 async function applyUpdate(){
   save();
@@ -3735,10 +3942,12 @@ function syncBar(){
   n.classList.remove('hide','off','pend');
   const off=!navigator.onLine;
   let txt='',cls='';
-  if(!hasFb){ txt=''; }
-  else if(!FB.on){ cls='off'; txt='同期していません — 設定から接続してください'; }
+  /* 端末のどこにも保存できていないのは、同期より先に知らせます（開き直すと消えるため） */
+  if(SAVE.at&&!SAVE.ls&&!SAVE.idb){ cls='off'; txt='⚠ この端末に保存できていません — 設定 → 保存と復旧 を見てください'; }
+  else if(!hasFb){ txt=''; }
+  else if(!FB.on){ cls='off'; txt='同期していません'+(FB.err?'（'+esc(errJa(FB.err))+'）':'')+' — 回線が戻れば自動でつなぎ直します'; }
   else if(off){ cls='pend'; txt='オフライン — 記録はこの端末に残り、回線が戻ると自動で送られます'; }
-  else if(FB.pend){ cls='pend'; txt='送信待ち'+(FB.err?'（'+esc(FB.err.slice(0,40))+'）':''); }
+  else if(FB.pend){ cls='pend'; txt='送信待ち'+(FB.err?'（'+esc(errJa(FB.err))+'）':''); }
   else { txt='同期中'; }
   if(cls) n.classList.add(cls);
   const ago=FB.at?Math.round((Date.now()-FB.at)/1000):null;
@@ -3759,7 +3968,7 @@ function syncBar(){
 /* ---- 使用者の交代 ----
    麻酔中の症例を開いていれば「記録者 ○○」として経過に残します */
 function switchUser(){
-  const live=db.cases.filter(c=>statusOf(c).k==='live');
+  const live=db.cases.filter(c=>alive(c)&&statusOf(c).k==='live');
   const target=(cur&&statusOf(cur).k==='live')?cur:(live.length===1?live[0]:null);
   openModal(`<h2>使用者の交代</h2>
     <p class="muted" style="font-size:12.5px;margin:0 0 10px">
@@ -3799,28 +4008,74 @@ function diffOps(c){
     if(!(k in curF)){ ops[k]='__DEL__'; n++; } }
   return {w,ops,n};
 }
-let fbBeat=null, pushTimer=null;
+let fbBeat=null, pushTimers={};
+/* 送信待ちの症例が残っているか（症例ごとに見ます） */
+const pendCount=()=>Object.keys(FB.dirty||{}).filter(id=>FB.dirty[id]&&FB.dirty[id].size).length;
 function fbPush(c){
   if(!FB.on||!FB.fs||!c) return;
   const d=diffOps(c);
-  if(!d.n){ if(!(FB.dirty&&FB.dirty[c.id]&&FB.dirty[c.id].size)){ FB.pend=false; syncBar(); } return; }
   FB.dirty=FB.dirty||{};
+  if(!d.n){ delete FB.dirty[c.id]; FB.pend=pendCount()>0; syncBar(); return; }
   const set=FB.dirty[c.id]=FB.dirty[c.id]||new Set();
   Object.keys(d.ops).forEach(k=>set.add(k));
   FB.pend=true; syncBar();
-  clearTimeout(pushTimer);
-  pushTimer=setTimeout(async()=>{
-    const fs=FB.fs, ref=fs.doc(FB.db,'anesCases',c.id);
-    const d2=diffOps(c); if(!d2.n){ delete FB.dirty[c.id]; FB.pend=false; syncBar(); return; }
-    const ops={}; Object.keys(d2.ops).forEach(k=>ops[k]=d2.ops[k]==='__DEL__'?fs.deleteField():d2.ops[k]);
-    ops.id=c.id; ops._by=myName()||'—'; ops._at=new Date().toISOString();
-    try{ await fs.setDoc(ref,{id:c.id},{merge:true}); await fs.updateDoc(ref,ops);
-      FB.synced[c.id]=cln(d2.w); delete FB.dirty[c.id]; FB.at=Date.now(); FB.pend=false; FB.err=''; }
-    catch(e){ try{ await fs.setDoc(ref,d2.w,{merge:true});
-        FB.synced[c.id]=cln(d2.w); delete FB.dirty[c.id]; FB.at=Date.now(); FB.pend=false; FB.err=''; }
-      catch(e2){ FB.pend=true; FB.err=String(e2.message||e2); } }
-    syncBar();
-  },500);
+  /* 以前はタイマーが1つだけで、別の症例を続けて触ると前の症例の送信が取り消されていました */
+  clearTimeout(pushTimers[c.id]);
+  pushTimers[c.id]=setTimeout(()=>fbSend(c),500);
+}
+async function fbSend(c){
+  if(!FB.on||!FB.fs||!c) return false;
+  clearTimeout(pushTimers[c.id]); delete pushTimers[c.id];
+  const fs=FB.fs, ref=fs.doc(FB.db,'anesCases',c.id);
+  const d2=diffOps(c); if(!d2.n){ delete FB.dirty[c.id]; FB.pend=pendCount()>0; syncBar(); return true; }
+  const ops={}; Object.keys(d2.ops).forEach(k=>ops[k]=d2.ops[k]==='__DEL__'?fs.deleteField():d2.ops[k]);
+  ops.id=c.id; ops._by=myName()||'—'; ops._at=new Date().toISOString();
+  let ok=false;
+  try{ await fs.setDoc(ref,{id:c.id},{merge:true}); await fs.updateDoc(ref,ops); ok=true; }
+  catch(e){ try{ await fs.setDoc(ref,d2.w,{merge:true}); ok=true; }
+    catch(e2){ FB.err=String(e2.message||e2); } }
+  if(ok){ FB.synced[c.id]=cln(d2.w); delete FB.dirty[c.id]; FB.at=Date.now(); FB.err=''; syncedPersist(); }
+  FB.pend=pendCount()>0; syncBar();
+  return ok;
+}
+/* 開いていない症例に変更が残っていないかを見回って送ります（15秒おき）。
+   以前は「いま開いている症例」しか送らなかったので、一覧や術後画面での変更が残ることがありました */
+function fbSweep(){
+  if(!FB.on||!FB.fs) return;
+  const cut=dayAgo(7);
+  db.cases.forEach(c=>{ if(!c||!c.id) return;
+    if(String((c.meta||{}).date||'')<cut&&!(FB.dirty&&FB.dirty[c.id])) return;  /* 古い症例は毎回は見ない */
+    if(pushTimers[c.id]) return;
+    const d=diffOps(c); if(d.n) fbPush(c); });
+}
+/* 画面が隠れる・閉じるときは待たずに送ります（iPad はすぐアプリを止めるため） */
+async function fbFlush(){
+  if(!FB.on||!FB.fs) return;
+  const ids=Object.keys(pushTimers).concat(Object.keys(FB.dirty||{}));
+  for(const id of new Set(ids)){ const c=db.cases.find(x=>x.id===id); if(c) await fbSend(c); }
+}
+if(typeof window!=='undefined'){
+  setInterval(fbSweep,15000);
+  document.addEventListener('visibilitychange',()=>{ if(document.hidden) fbFlush(); });
+  window.addEventListener('pagehide',()=>{ fbFlush(); });
+}
+/* 過去の症例をクラウドから読み込む（45日より前のもの）。
+   手元に無いものを足すだけで、消す方向には動きません。days が 0 なら全部 */
+async function fbLoadOlder(days){
+  if(!FB.on||!FB.fs){ toast('同期につながっていません'); return 0; }
+  const fs=FB.fs; let q=fs.collection(FB.db,'anesCases');
+  if(days>0) q=fs.query(q,fs.where('meta.date','>=',dayAgo(days)));
+  toast('読み込んでいます…');
+  try{
+    const sn=await fs.getDocs(q); let added=0, upd=0;
+    sn.docs.forEach(dd=>{ const r=dd.data(); if(!r||!r.id) return;
+      const l=db.cases.find(x=>x.id===r.id);
+      if(!l){ db.cases.push(fix(fromSync(r))); FB.synced[r.id]=cln(r); added++; return; }
+      if(!FB.synced[r.id]){ FB.synced[r.id]=cln(r); upd++; } });
+    syncedPersist(); save(); render();
+    toast(`${added} 件を読み込みました`+(upd?`（${upd} 件は手元にありました）`:''));
+    return added;
+  }catch(e){ toast('読み込めませんでした: '+(e.message||e)); return 0; }
 }
 
 /* ---- スタッフ管理 ---- */
@@ -3913,8 +4168,15 @@ function firstRunSave(){
   if(c) go(['rec','report','prep','postop'].indexOf(r.view)>=0?r.view:'rec',c,false);
 })();
 render(); syncBar();
-/* 院内設定に firebaseConfig が入っていれば、初回起動から自動でつなぎます */
-if(cfg('fbCfg')&&(store.get('fbOn')==='1'||SITE_CONFIG.fbCfg)) fbConnect(true);
+/* 起動の順番：端末の控え（IndexedDB）を見て新しければ戻す → 同期につなぐ。
+   先に同期をつなぐと、端末に残っていた記録より前にクラウドの古い内容が入ってしまうため */
+(async()=>{
+  const restored=await bootRestore();
+  if(restored){ render(); toast('端末の控えから記録を戻しました'); }
+  else { try{ await idbOpen(); }catch(e){} }
+  /* 院内設定に firebaseConfig が入っていれば、初回起動から自動でつなぎます */
+  if(cfg('fbCfg')&&(store.get('fbOn')==='1'||SITE_CONFIG.fbCfg)) fbConnect(true);
+})();
 firstRun();
 /* 起動のたびと、30分おきに、新しい版が出ていないかを見ます */
 setTimeout(checkUpdate,4000);
