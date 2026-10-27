@@ -1,8 +1,13 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<!-- ★ バージョン: v2026.10.06-1（画面表示は APP_VER = v3.6）
-     2026-10-06 記録が消えない・どの端末でも見える・自分で戻せる、のための改修。
+<!-- ★ バージョン: v2026.10.27-1（画面表示は APP_VER = v3.7）
+     2026-10-27 スタッフからの要望3件
+       ・麻酔記録の画面の上（固定の帯）に 動物種・品種・性別・年齢 を出す。患者情報に 品種・年齢・性別 の入力を追加
+       ・輸液（mL/kg/hr × 体重）と CRI（mL/hr）の投与容積を「速度 × 続いた時間」で合計し、
+         記録画面・報告書・報告書の文章に出す。抜管を押したときにも知らせる
+       ・患者リストに 東京／名古屋／両院 の切り替え。はじめはその端末の拠点。患者情報で拠点を直せる
+     2026-10-06 v2026.10.06-1 記録が消えない・どの端末でも見える・自分で戻せる、のための改修。
        ・保存先を IndexedDB に（localStorage 満杯で黙って消える問題）。控えを10分おきに残す
        ・同期：回線が戻ったら自動でつなぎ直す／症例ごとに送る／画面が隠れる前に送る／
          開いていない症例の変更も見回って送る／前回の同期の土台を端末に残す
@@ -314,7 +319,7 @@ svg.vchart{display:block;max-width:none}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VER='v3.6 (2026-10-06)';   /* 不具合報告のときに一緒に送られます */
+const APP_VER='v3.7 (2026-10-27)';   /* 不具合報告のときに一緒に送られます */
 
 /* ══════════════════════════════════════════════════════════════════
    院内設定 — ここだけ書き換えてください（管理者が1回だけ）
@@ -781,6 +786,13 @@ const FINDINGS=['異常なし','努力呼吸','チアノーゼ','粘膜蒼白','
 const COMORBID=['なし','心疾患','呼吸器疾患','腎疾患','肝疾患','内分泌疾患','神経疾患','腫瘍','貧血','てんかん'];
 const RISK=['I','II','III','IV','V','E'];
 const SPECIES=['犬','猫'];
+/* 性別の表記は入院管理アプリと同じにしています */
+const SEXES=['♂','♂（去勢済）','♀','♀（避妊済）'];
+/* 拠点は必ず 東京 → 名古屋 の順 */
+const SITE_LIST=['東京','名古屋'];
+/* 犬 トイプードル ・ ♀（避妊済） ・ 3歳 のように、患者の情報を1行にまとめます */
+const ptLine=c=>{ const m=c.meta;
+  return [[m.species,m.breed].filter(Boolean).join(' '),m.sex,m.age].filter(Boolean).join(' ・ '); };
 /* 診療科（東京・名古屋共通） */
 /* 診療科＝手術集計シートの「手術分類」列。実データの表記に合わせています
    （東京：整形外科・軟部外科・皮膚科／名古屋：神経外科・整形外科・腫瘍科・軟部外科・総合診療科） */
@@ -1036,6 +1048,61 @@ function elapsed(c){ const s=hm2m(c.chart.anesStart); if(s==null)return null;
 function opeElapsed(c){ const s=hm2m(c.chart.opeStart); if(s==null)return null;
   if(c.chart.opeStop) return diff(c.chart.opeStart,c.chart.opeStop);
   let d=nowMin()-s; if(d<-720)d+=1440; return Math.max(0,d); }
+/* 輸液と CRI の投与容積（mL）。「速度 × 続いた時間」で出します。
+   輸液：麻酔器の段の「輸液 mL/kg/hr」× 体重。CRI：投薬で記録した mL/hr。
+   どちらも、次に値を入れ直した時刻（0 と入れれば止めたことになる）まで続いたものとし、
+   最後の値は抜管まで続いたものとします。抜管前は「いま」までの量です。
+   前の日の記録で抜管が押されていないときは、最後のバイタルの時刻までで止めます */
+function volEnd(c){
+  if(c.chart.anesStop) return {m:hm2m(c.chart.anesStop),l:'抜管まで'};
+  if(c.meta.date===today()&&c.chart.anesStart) return {m:nowMin(),l:'いままで'};
+  let mx=null; Object.keys(c.chart.v).forEach(t=>{ const m=hm2m(t); if(m!=null&&(mx==null||m>mx)) mx=m; });
+  c.doses.forEach(d=>{ const m=hm2m(d.t); if(m!=null&&(mx==null||m>mx)) mx=m; });
+  return {m:mx,l:'最後の記録まで（抜管が未記録）'};
+}
+function volSeg(pts,endM){   /* pts=[{m,rate}] 時刻順。合計 mL と区間を返します */
+  let ml=0, from=null, to=null;
+  pts.forEach((p,i)=>{
+    const nxt=i+1<pts.length?pts[i+1].m:endM;
+    let dur=nxt-p.m; if(dur<-720) dur+=1440;
+    let lim=endM-p.m; if(lim<-720) lim+=1440;
+    dur=Math.min(dur,lim); if(dur<=0||!(p.rate>0)) return;
+    ml+=p.rate*dur/60; if(from==null) from=p.m; to=p.m+dur;
+  });
+  return {ml,from,to};
+}
+function volumes(c){
+  const W=bw(c), e=volEnd(c), rows=[];
+  if(e.m==null) return {rows,end:e};
+  /* 輸液 */
+  const fl=Object.keys(c.chart.v).map(t=>({m:hm2m(t),v:c.chart.v[t].fluid}))
+    .filter(x=>x.m!=null&&x.v!=null&&x.v!==''&&isFinite(+x.v)).sort((a,b)=>a.m-b.m);
+  if(fl.length){
+    if(W){ const r=volSeg(fl.map(x=>({m:x.m,rate:(+x.v)*W})),e.m);
+      rows.push({l:'輸液',ml:r.ml,from:r.from,to:r.to,u:'mL/kg/hr',rates:fl.map(x=>+x.v)}); }
+    else rows.push({l:'輸液',ml:null,note:'体重が未入力のため計算できません'});
+  }
+  /* CRI（術後の投薬は含めません） */
+  const g={};
+  c.doses.filter(d=>d.route==='CRI'&&!d.po&&hm2m(d.t)!=null).forEach(d=>{
+    const nm=bareName(d.name)||d.name; (g[nm]=g[nm]||[]).push({m:hm2m(d.t),rate:/^mL\/h/i.test(d.unit||'mL/hr')?+String(d.amt).replace(/[^\d.]/g,''):NaN,amt:d.amt}); });
+  Object.keys(g).forEach(nm=>{ const pts=g[nm].sort((a,b)=>a.m-b.m);
+    if(pts.some(p=>!isFinite(p.rate))){ rows.push({l:nm,ml:null,note:'mL/hr が読めない記録があります'}); return; }
+    const r=volSeg(pts,e.m); rows.push({l:nm,ml:r.ml,from:r.from,to:r.to,u:'mL/hr',rates:pts.map(p=>p.rate)}); });
+  return {rows,end:e};
+}
+/* 「輸液 120 mL ・ フェンタニル 12.5 mL」の形 */
+function volText(c,sep){
+  const v=volumes(c); if(!v.rows.length) return '';
+  return v.rows.map(r=>r.ml==null?`${r.l} —`:`${r.l} ${fmt(Math.round(r.ml*10)/10)} mL`).join(sep||'、');
+}
+function volHTML(c){
+  const v=volumes(c); if(!v.rows.length) return '';
+  return `<div class="row muted" style="font-size:11.5px;margin-top:7px;gap:11px;flex-wrap:wrap">
+    <span>投与量（${esc(v.end.l)}）</span>${v.rows.map(r=>r.ml==null
+      ?`<span>${esc(r.l)} <b>—</b><small> ${esc(r.note||'')}</small></span>`
+      :`<span>${esc(r.l)} <b>${fmt(Math.round(r.ml*10)/10)}</b> mL${r.from!=null?`<small> ${m2hm(r.from)}–${m2hm(r.to)}</small>`:''}</span>`).join('')}</div>`;
+}
 function lastVitalMin(c){
   let mx=null; Object.keys(c.chart.v).forEach(t=>{const m=hm2m(t); if(m!=null&&(mx==null||m>mx))mx=m});
   if(mx==null)return null; let d=nowMin()-mx; if(d<-720)d+=1440; return d;
@@ -1071,13 +1138,24 @@ function head(t,s){ document.getElementById('hTitle').textContent=t; document.ge
 
 /* ================= ① 患者リスト ================= */
 let listFilter='today';
+/* 患者リストの拠点。はじめはこの端末の拠点。「両院」を選ぶと東京・名古屋をまとめて出します */
+let listSite=null;
+const listSiteNow=()=>{ if(listSite==null){ const v=store.get('listSite'); listSite=(v==='両院'||SITE_LIST.includes(v))?v:siteName(); } return listSite; };
+function setListSite(v){ listSite=v; store.set('listSite',v); render(); }
+/* 拠点が入っていない古い症例は、どの拠点でも出します（隠れて見つからないより良い） */
+const inSite=(c,st)=>st==='両院'||!c.meta.site||c.meta.site===st;
+const SITE_COL={'東京':'#8DBE3C','名古屋':'#9B4F96'};
+const siteTag=c=>c.meta.site?`<span style="color:${SITE_COL[c.meta.site]||'#555'};font-weight:800">${esc(c.meta.site)}</span>`:'<span class="muted">拠点なし</span>';
 function viewList(M){
   head('麻酔患者リスト', new Date().toLocaleDateString('ja-JP',{month:'long',day:'numeric',weekday:'short'}));
   const f=document.getElementById('fab');
   f.textContent='＋ 新規麻酔'; f.onclick=()=>{const c=fix(blank());db.cases.push(c);save();go('edit',c)};
   f.classList.remove('hide');
 
-  const all=db.cases.filter(alive).sort((a,b)=>{
+  const st=listSiteNow();
+  const everyone=db.cases.filter(alive);
+  const nSite=x=>everyone.filter(c=>inSite(c,x)).length;
+  const all=everyone.filter(c=>inSite(c,st)).sort((a,b)=>{
     const o={live:0,ready:1,prep:2,plan:3,done:4};
     const d=o[statusOf(a).k]-o[statusOf(b).k]; if(d)return d;
     return String(b.meta.date).localeCompare(String(a.meta.date));
@@ -1096,14 +1174,19 @@ function viewList(M){
     }).join('')}
     ${pend.length>6?`<div class="muted" style="font-size:11.5px;margin-top:4px">ほか ${pend.length-6} 件</div>`:''}
   </div>`:''}
-  <div class="row" style="margin-bottom:12px">
+  <div class="row" style="margin-bottom:12px;gap:10px;flex-wrap:wrap">
+    <div class="chips" id="l_site">
+      ${SITE_LIST.map(x=>`<button class="${st===x?'on':''}" style="${st===x?`border-color:${SITE_COL[x]};background:${SITE_COL[x]};color:#fff`:''}" onclick="setListSite('${x}')">${x}（${nSite(x)}）</button>`).join('')}
+      <button class="${st==='両院'?'on':''}" onclick="setListSite('両院')">両院</button>
+    </div>
     <div class="chips">
       <button class="${listFilter==='today'?'on':''}" onclick="listFilter='today';render()">本日</button>
       <button class="${listFilter==='all'?'on':''}" onclick="listFilter='all';render()">すべて（${all.length}）</button>
     </div>
   </div>
   <div class="plist">${list.length?list.map(pcard).join(''):
-    '<div class="empty">本日の麻酔はまだ登録されていません。<br>右下の「＋ 新規麻酔」から登録してください。</div>'}</div>`;
+    `<div class="empty">${st==='両院'?'本日':st+'院の本日'}の麻酔はまだ登録されていません。<br>右下の「＋ 新規麻酔」から登録してください。${
+      st!=='両院'&&everyone.some(c=>!inSite(c,st)&&(c.meta.date===today()||statusOf(c).k==='live'))?'<br><span class="muted">別の拠点には本日の症例があります（上の拠点を切り替えると見えます）</span>':''}</div>`}</div>`;
 }
 function pcard(c){
   const s=statusOf(c), k=col(c), t=times(c), el=elapsed(c), lv=lastVitalMin(c), oel=opeElapsed(c);
@@ -1115,8 +1198,10 @@ function pcard(c){
       <div class="meta">
         <span class="st ${s.k}">${s.l}</span>
         <span>${esc(c.meta.patientId||'ID未入力')}</span>
+        ${ptLine(c)?`<span>${esc(ptLine(c))}</span>`:''}
         <span>${esc(c.meta.bw||'?')}kg</span>
         <span>${esc(c.meta.date||'')}</span>
+        ${listSiteNow()==='両院'?siteTag(c):''}
         ${c.meta.risk?`<span>ASA ${esc(c.meta.risk)}</span>`:''}
         ${s.k==='live'&&el!=null?`<span style="color:var(--warn);font-weight:800">麻酔 ${el}分</span>`:''}
         ${s.k==='live'&&oel!=null&&!c.chart.opeStop?`<span style="color:var(--warn);font-weight:800">手術 ${oel}分</span>`:''}
@@ -1151,7 +1236,7 @@ function viewDetail(M){
   M.innerHTML=`
   <div class="card" style="border-left:8px solid ${k.br}">
     <div class="row" style="margin-bottom:8px"><span class="st ${s.k}">${s.l}</span>
-      <span class="muted" style="font-size:12.5px">${esc([c.meta.species,c.meta.breed,c.meta.sex,c.meta.age].filter(Boolean).join(' / '))}</span></div>
+      <span class="muted" style="font-size:12.5px">${esc(ptLine(c))}</span></div>
     <div class="grid g2" style="font-size:13.5px">
       <div><b>術式</b><br>${esc(c.meta.procedure||'—')}</div>
       <div><b>診療科</b><br>${esc(c.meta.dept||'—')}</div>
@@ -1222,6 +1307,14 @@ function viewEdit(M){
     </div>
   </div>
   <div class="card">
+    <h3>患者の情報（麻酔記録の画面の上に出ます）</h3>
+    <div class="grid g2">
+      <label class="f"><span>品種</span><input id="e_breed" value="${esc(c.meta.breed||'')}" placeholder="例）トイプードル"></label>
+      <label class="f"><span>年齢</span><input id="e_age" value="${esc(c.meta.age||'')}" placeholder="例）3歳2か月"></label>
+    </div>
+    <label class="f"><span>性別</span><div class="chips" id="e_sex">${SEXES.map(x=>`<button data-v="${x}" class="${c.meta.sex===x?'on':''}">${x}</button>`).join('')}</div></label>
+  </div>
+  <div class="card">
     <h3>手術集計への書き出しに必要な項目</h3>
     <p class="muted" style="font-size:12px;margin:-4px 0 8px">あとから入れても構いません。揃うまで書き出しはできません。</p>
     <div class="grid g2">
@@ -1232,6 +1325,8 @@ function viewEdit(M){
         <div class="chips" id="e_dept">${
           (c.meta.dept&&DEPTS.indexOf(c.meta.dept)<0?[c.meta.dept,...DEPTS]:DEPTS)
           .map(x=>`<button data-v="${esc(x)}" class="${c.meta.dept===x?'on':''}">${esc(x)}</button>`).join('')}</div></label>
+      <label class="f"><span>拠点（患者リストの分け方に使います）</span>
+        <div class="chips" id="e_site">${SITE_LIST.map(x=>`<button data-v="${x}" class="${(c.meta.site||'')===x?'on':''}">${x}</button>`).join('')}</div></label>
     </div>
   </div>
   <div class="card"><h3>麻酔リスク（ASA-PS）</h3>
@@ -1255,6 +1350,7 @@ function viewEdit(M){
     const v=b.dataset.v,i=arr.indexOf(v); if(i<0)arr.push(v); else arr.splice(i,1);
     b.classList.toggle('on',i<0)});
   single('e_sp',v=>c.meta.species=v); single('e_risk',v=>c.meta.risk=v); single('e_dept',v=>c.meta.dept=v);
+  single('e_sex',v=>c.meta.sex=v); single('e_site',v=>c.meta.site=v);
   multi('e_find',c.meta.findings); multi('e_com',c.meta.comorbid);
   const an=document.querySelector('select[data-staff="anesthetist"]');
   if(an) an.onchange=()=>{ c.meta.anesthetist=an.value; };
@@ -1270,6 +1366,7 @@ function saveEdit(){
   const c=cur, g=id=>document.getElementById(id).value.trim();
   c.meta.date=g('e_date')||today(); c.meta.patientId=g('e_pid'); c.meta.patientName=g('e_name');
   c.meta.bw=g('e_bw'); c.meta.procedure=g('e_proc');
+  c.meta.breed=g('e_breed'); c.meta.age=g('e_age');
   const an=document.querySelector('select[data-staff="anesthetist"]');
   if(an) c.meta.anesthetist=an.value;
   const miss=coreMissing(c);
@@ -1530,7 +1627,8 @@ let recTab='vital', recTime='';
 function viewRec(M){
   const c=cur, s=statusOf(c), t=times(c), el=elapsed(c), oel=opeElapsed(c);
   if(!recTime) recTime=nowHM();
-  head(c.meta.patientName||'（無題）', `${c.meta.patientId||''} ・ ${c.meta.bw||'?'}kg${
+  /* 動物種・品種・性別・年齢を、麻酔中ずっと見える画面の上に出します */
+  head(c.meta.patientName||'（無題）', `${[ptLine(c),c.meta.bw?c.meta.bw+'kg':'?kg',c.meta.patientId||''].filter(Boolean).join(' ・ ')}${
     el!=null?' ・ 麻酔 '+el+'分':''}${oel!=null&&!c.chart.opeStop?' ・ 手術 '+oel+'分':''}`);
   const st=[['anesStart','導入'],['intubation','挿管'],['opeStart','手術開始'],['opeStop','手術終了'],['anesStop','抜管']];
   const cell=k=>{const v=(c.chart.v[recTime]||{})[k]; return v==null||v===''?'—':v};
@@ -1550,6 +1648,7 @@ function viewRec(M){
     ${t.anes!=null||t.ind!=null?`<div class="row muted" style="font-size:11.5px;margin-top:7px;gap:11px">
       <span>導入＋移動 <b>${t.ind??'—'}</b>分</span><span>手術 <b>${t.ope??'—'}</b>分</span>
       <span>覚醒 <b>${t.wake??'—'}</b>分</span><span>麻酔 <b>${t.anes??'—'}</b>分</span></div>`:''}
+    ${volHTML(c)}
     ${alertBanners(c)}
   </div>
 
@@ -1728,7 +1827,10 @@ function stamp(k){
   if(k==='anesStart'&&!c.chart.start) c.chart.start=t;
   const ev=EVENTS.find(e=>e.stamp===k);
   if(ev&&!c.events.some(x=>evKind(x)===ev.k&&x.t===t)) c.events.push({k:uid(),t,kk:ev.k,l:ev.l});
-  recTime=t; save(); render(); toast(`${lab} ${t}（もう一度押すと時刻を直せます）`);
+  recTime=t; save(); render();
+  /* 抜管のときは、輸液・CRI の合計 mL をその場で知らせます */
+  const vt=k==='anesStop'?volText(c,' ・ '):'';
+  toast(vt?`${lab} ${t} ／ 投与量 ${vt}`:`${lab} ${t}（もう一度押すと時刻を直せます）`);
   /* 麻酔終了（抜管）で、その症例を Drive に残します */
   if(k==='anesStop'&&cfg('backupUrl')&&typeof backupCase==='function')
     setTimeout(()=>backupCase(c,true),600);
@@ -2965,6 +3067,7 @@ function reportText(c){
               ['維持',repVal(c,'maint')],['鎮痛',catLine(c,'鎮痛')],['循環',catLine(c,'循環')]];
   rows.forEach(([l,v])=>{ if(v) L.push(`・${l}：${v}`); });
   const etc=catLine(c,'その他'); if(etc) L.push(`・その他：${etc}`);
+  const vt=volText(c); if(vt) L.push(`・輸液・CRI 投与量（${volEnd(c).l}）：${vt}`);
   L.push('','■ 術中モニタリング');
   L.push(`・呼吸管理：${repVal(c,'resp')}`);
   L.push(`・循環管理：${repVal(c,'circ')}`);
@@ -3178,7 +3281,7 @@ function viewReport(M){
     <div class="grid g2" style="font-size:13.5px">
       <div><b>患者</b> ${esc(m.patientName)}（${esc(m.patientId)}）</div>
       <div><b>麻酔日</b> ${esc(m.date)}</div>
-      <div><b>動物種・体重</b> ${esc(m.species)} ${esc(m.bw)}kg</div>
+      <div><b>動物種・体重</b> ${esc(m.species)} ${esc(m.bw)}kg${[m.breed,m.sex,m.age].some(Boolean)?'<br><span class="muted">'+esc([m.breed,m.sex,m.age].filter(Boolean).join(' ・ '))+'</span>':''}</div>
       <div><b>ASA</b> ${esc(m.risk||'—')}</div>
       <div><b>術式</b> ${esc(m.procedure||'—')}</div>
       <div><b>基礎疾患</b> ${m.comorbid.length?m.comorbid.map(esc).join('、'):'—'}</div>
@@ -3190,6 +3293,10 @@ function viewReport(M){
     <div>抜管 ${esc(c.chart.anesStop||'—')}</div>
     <div><b>麻酔時間 ${t.anes??'—'} 分</b>（導入＋移動 ${t.ind??'—'} / 手術 ${t.ope??'—'} / 覚醒 ${t.wake??'—'}）</div>
   </div></div>
+  ${(()=>{ const v=volumes(c); if(!v.rows.length) return '';
+    return `<div class="card"><h3>輸液・CRI の投与量（${esc(v.end.l)}）</h3><div class="grid g2" style="font-size:13.5px">${
+      v.rows.map(r=>`<div><b>${esc(r.l)}</b> ${r.ml==null?'— <small class="muted">'+esc(r.note||'')+'</small>'
+        :`<b>${fmt(Math.round(r.ml*10)/10)} mL</b><small class="muted"> ${m2hm(r.from)}–${m2hm(r.to)} ／ ${r.rates.map(x=>fmt(x)).join(' → ')} ${esc(r.u)}</small>`}</div>`).join('')}</div></div>`; })()}
   <div class="card"><h3>バイタルの推移</h3><div class="grid" style="font-size:13.5px;gap:6px">
     ${box('HR','hr','bpm')}${box('MAP','map','mmHg')}${box('SpO2','spo2','%')}
     ${box('EtCO2','etco2','mmHg')}${box('Temp','temp','℃')}
@@ -3531,7 +3638,8 @@ function openSettings(){
   document.getElementById('s_site').querySelectorAll('button').forEach(b=>b.onclick=()=>{
     document.getElementById('s_site').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
     b.classList.add('on');
-    if(b.dataset.v===(SITE_CONFIG.site||'').trim()) store.del('site'); else store.set('site',b.dataset.v); });
+    if(b.dataset.v===(SITE_CONFIG.site||'').trim()) store.del('site'); else store.set('site',b.dataset.v);
+    listSite=null; store.del('listSite');   /* 端末の拠点を変えたら、患者リストもその拠点に */ });
   const fb=document.getElementById('s_fb');
   if(fb) fb.onchange=()=>{ const v=fb.value.trim();
     if(v===(SITE_CONFIG.fbForm||'').trim()) store.del('fbForm'); else store.set('fbForm',v); };
@@ -4138,7 +4246,7 @@ function firstRun(){
   const g=document.getElementById('i_site');
   g.querySelectorAll('button').forEach(b2=>b2.onclick=()=>{
     g.querySelectorAll('button').forEach(x=>x.classList.remove('on'));
-    b2.classList.add('on'); store.set('site',b2.dataset.v);
+    b2.classList.add('on'); store.set('site',b2.dataset.v); listSite=null; store.del('listSite');
     document.getElementById('i_namewrap').innerHTML=staffSel('あなたの名前','me',{me:''},false,'— 選んでください —'); });
   const d=document.getElementById('i_dev');
   d.querySelectorAll('button').forEach(b2=>b2.onclick=()=>{
